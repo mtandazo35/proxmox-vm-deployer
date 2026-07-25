@@ -1,0 +1,92 @@
+# proxmox-vm-deployer
+
+Instalador interactivo para desplegar VMs en **Proxmox VE** a partir de imágenes
+cloud (`cloud-init`). Pensado para funcionar en **cualquier nodo Proxmox**, sin
+hardcodear nada del hardware donde se probó.
+
+Soporta Debian 12/13 y Ubuntu 20.04/22.04/24.04 (genericcloud / cloud images).
+
+## Qué hace
+
+Es un asistente por consola (`deploy-vm.sh`) que:
+
+1. Descarga (y cachea) la imagen cloud del SO elegido.
+2. Pregunta VMID, nombre, modo de autenticación (clave SSH / password),
+   red (bridge, VLAN, IPv4/IPv6, gateway, DNS) y recursos (CPU, RAM, disco).
+3. Genera el `user-data` y el `network-config v2` de cloud-init como snippets.
+4. Crea la VM con `qm`, importa el disco al storage correcto, arranca y espera
+   a que el guest-agent responda (señal de que cloud-init terminó).
+
+## Detección genérica (no asume el hardware del nodo de prueba)
+
+- **`cpu=`** — `host` si el nodo es standalone (máximo rendimiento);
+  `x86-64-v2-AES` si existe `/etc/pve/corosync.conf`, para no romper la
+  migración en vivo en clusters con CPU heterogénea.
+- **`ssd=1`** — solo si se confirma. Resuelve el storage a sus discos físicos
+  (`lvm`/`lvmthin` vía `pvs`, `dir` vía `findmnt` — incluido root-on-ZFS —,
+  `zfspool` vía `zpool list`) y consulta `lsblk ROTA`. En storage remoto
+  (NFS/CIFS/CephFS/RBD) no se puede saber y el flag se omite.
+- **Storage y bridge** — se listan los realmente disponibles en el nodo.
+- **`queues=`** — multiqueue virtio-net cuando `cores > 1`.
+
+## El bug de red que motivó la v8 (portabilidad)
+
+El `network-config v2` emparejaba la interfaz del guest **por driver**:
+
+```yaml
+ethernets:
+  eth0:
+    match:
+      driver: virtio*
+```
+
+…y el override de netplan de Ubuntu la fijaba por **nombre hardcodeado**
+(`ens18`). Ninguna de las dos formas es portable:
+
+- **`match: driver:`** es un concepto de netplan. Debian genericcloud **no trae
+  netplan**: cloud-init renderiza a `systemd-networkd`/ENI (`ifupdown`) y ahí el
+  match por driver **no se traduce**, así que la interfaz nunca recibe la
+  configuración → la VM arranca **sin ruta ni internet** (cloud-init se queda
+  colgado en `package_upgrade` porque no hay red, y el guest-agent nunca llega
+  a instalarse).
+- **`ens18` hardcodeado** solo acierta en los nodos donde el guest nombra así la
+  NIC; con otra máquina/BIOS/imagen puede ser `enp6s18`, `eth0`, etc.
+
+### El fix: emparejar por MAC
+
+El instalador ahora **genera un MAC fijo** con el OUI de Proxmox (`BC:24:11`),
+lo fija en `net0` y empareja la interfaz por ese MAC — igual que hace el propio
+Proxmox en su config nativa:
+
+```yaml
+ethernets:
+  nic0:
+    match:
+      macaddress: "bc:24:11:xx:xx:xx"
+```
+
+El match por MAC se traduce correctamente a **cualquier renderer** (ENI de
+Debian, systemd-networkd, netplan de Ubuntu) y no depende del nombre de la NIC
+ni de renombrarla. Caso real: VM 109 `dns` (Debian 13) en el nodo
+`GOBRAVCORP` (`131.196.14.44`), desplegada con la versión anterior, quedó sin
+internet por exactamente este motivo.
+
+## Uso
+
+```bash
+scp deploy-vm.sh root@<nodo-proxmox>:/root/
+ssh root@<nodo-proxmox>
+chmod +x /root/deploy-vm.sh
+/root/deploy-vm.sh
+```
+
+Es interactivo. Al terminar imprime cómo entrar (`qm terminal <vmid>` /
+`ssh root@<ip>`) y dónde quedó el log del despliegue.
+
+## Notas
+
+- Las imágenes cloud quedan cacheadas en el nodo entre despliegues.
+- El SO se instala con `qemu-guest-agent`; el instalador espera a que responda
+  como confirmación de que cloud-init terminó.
+- `.gitattributes` fuerza `eol=lf`: un CRLF hace que Linux responda
+  `No such file or directory` al ejecutar el script.

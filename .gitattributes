@@ -1,0 +1,5 @@
+# Los scripts se ejecutan en Linux (Proxmox). Forzar LF siempre, aunque se
+# editen en Windows — un CRLF hace que el shell responda "No such file or
+# directory" o "bad interpreter" al ejecutarlos.
+* text=auto eol=lf
+*.sh text eol=lf
