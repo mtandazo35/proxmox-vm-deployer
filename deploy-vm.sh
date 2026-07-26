@@ -1,12 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-# Cloud-Init Proxmox - Instalador Modular V7.4
-# Cambios 7.4: hardening de auth (respeta AUTH_MODE), verificación SHA, mkpasswd
-# por stdin, umask en YAMLs, pvesh-based path discovery, qm guest ping post-deploy,
-# logs en /var/log/proxmox-deploy/, validación de hostname, wget con reintentos
+# Cloud-Init Proxmox - Instalador Modular V8.1
+# Cambios 8.0: red por MAC fija (OUI Proxmox) en vez de match por driver/nombre
+# Cambios 8.1: set -E + trap EXIT (rollback cubre fallos dentro de funciones),
+# checksum por nombre remoto (Ubuntu nunca se verificaba), validación AUTH_MODE/
+# claves SSH/DNS/VLAN/índice storage, disco mínimo = tamaño virtual de la imagen,
+# pvesm set preserva content real, VMID chequeado a nivel cluster, descarga a
+# .part, MAC sin colisiones, bootcmd once-per-instance, netplan 600, timeout 600s
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ==================== GLOBALES Y COLORES ====================
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -19,7 +22,8 @@ BRIDGE=""; VLAN_TAG=""; IPV4_VAL=""; IPV4_CIDR=""; GW_IPV4=""
 IPV6_CONFIGURED=false; GW_IPV6=""; DNS_SERVERS=""
 OS_TYPE="debian"
 CPU_TYPE="host"; STORAGE_SSD_FLAG=""
-SUCCESS=false; ROLLBACK_EXECUTED=false; LOG_FILE=""; NETWORK_YAML_FILE=""
+SUCCESS=false; ROLLBACK_EXECUTED=false; LOG_FILE=""; NETWORK_YAML_FILE=""; YAML_FILE=""
+VM_MAC=""; IMG_MIN_GB="2"; PERMIT_ROOT_LOGIN=""
 
 # ==================== FUNCIONES DE VALIDACIÓN Y CONTROL ====================
 valid_ipv4() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { IFS='.' read -r a b c d <<< "$1"; (( a<=255 && b<=255 && c<=255 && d<=255 )); }; }
@@ -38,6 +42,20 @@ valid_ipv6_cidr() {
     addr="${ip_cidr%/*}"; prefix="${ip_cidr##*/}"
     [[ "$prefix" =~ ^[0-9]+$ ]] && (( prefix >= 0 && prefix <= 128 )) || return 1
     valid_ipv6_addr "$addr"
+}
+
+# El VMID es único a nivel CLUSTER (VMs y CTs de todos los nodos). qm status
+# solo ve el nodo local, así que primero consultamos /cluster/resources; si la
+# API no responde, caemos al chequeo local como mínimo.
+vmid_exists() {
+    local id="$1" out
+    out=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null) || out=""
+    if [ -n "$out" ]; then
+        if printf '%s' "$out" | python3 -c 'import json,sys; ids={str(r.get("vmid")) for r in json.load(sys.stdin)}; sys.exit(0 if sys.argv[1] in ids else 1)' "$id" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    qm status "$id" &>/dev/null
 }
 
 # ==================== FUNCIONES DE DETECCIÓN (GENÉRICO PARA CUALQUIER NODO) ====================
@@ -109,13 +127,13 @@ rollback() {
 
     set +e
 
-    # Limpiar descarga parcial de imagen si fue interrumpida
-    if [ -n "${FILE_PATH:-}" ] && [ -f "$FILE_PATH" ] && [ ! -s "$FILE_PATH" ]; then
-        rm -f "$FILE_PATH"
-    fi
+    # Limpiar descarga parcial de imagen si fue interrumpida (la descarga
+    # completa se hace a .part y se renombra al final, así el caché nunca
+    # queda con una imagen a medias)
+    [ -n "${FILE_PATH:-}" ] && rm -f "${FILE_PATH}.part"
 
     if [ -z "$VMID" ]; then
-        echo -e "\n${YELLOW}⏹️  Operación cancelada por el usuario. No se hicieron cambios en el nodo.${NC}"
+        echo -e "\n${YELLOW}⏹️  Instalación abortada. No se hicieron cambios en el nodo.${NC}"
         exit 1
     fi
 
@@ -134,13 +152,16 @@ rollback() {
 
     exit 1
 }
-trap rollback INT TERM ERR
+# EXIT incluido: los `exit 1` explícitos NO disparan ERR, y sin -E el trap ERR
+# ni siquiera se hereda dentro de funciones — con ERR+EXIT+set -E el rollback
+# cubre todos los caminos de fallo (el guard SUCCESS evita limpiar en éxito).
+trap rollback INT TERM ERR EXIT
 
 # ==============================================================================
 # FASE 1: SELECCIÓN DE SISTEMA OPERATIVO Y DESCARGA (ACTUALIZADO V7.2)
 # ==============================================================================
 select_os_and_download() {
-    clear
+    clear 2>/dev/null || true   # sin TTY (ssh no interactivo) clear falla y set -e mataría el script
     echo -e "${GREEN}╔════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║    Cloud-Init Proxmox - Despliegue Automatizado      ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
@@ -203,19 +224,27 @@ select_os_and_download() {
     fi
 
     # Descarga (con posible re-descarga automática si el checksum no matchea el cache)
+    # Descargar a .part y renombrar al terminar: una descarga interrumpida
+    # jamás queda en caché como si fuera una imagen completa.
     local FRESHLY_DOWNLOADED=false
     if [ ! -f "$FILE_PATH" ]; then
         echo -e "${YELLOW}📥 Descargando imagen oficial ($IMAGE_NAME)...${NC}"
-        if ! wget -q --show-progress --tries=3 --timeout=30 --continue -O "$FILE_PATH" "$IMAGE_URL"; then
-            echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; rm -f "$FILE_PATH"; exit 1
+        if ! wget -q --show-progress --tries=3 --timeout=30 --continue -O "${FILE_PATH}.part" "$IMAGE_URL"; then
+            echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; rm -f "${FILE_PATH}.part"; exit 1
         fi
+        mv "${FILE_PATH}.part" "$FILE_PATH"
         FRESHLY_DOWNLOADED=true
     else
         echo -e "${GREEN}✅ Imagen '$IMAGE_NAME' encontrada en caché local.${NC}"
     fi
 
-    # Verificar checksum oficial (re-descarga si el cache esta desactualizado)
+    # Verificar checksum oficial (re-descarga si el cache esta desactualizado).
+    # OJO: en el archivo de sumas upstream la imagen aparece con su nombre
+    # ORIGINAL (ej. noble-server-cloudimg-amd64.img), no con el nombre local
+    # renombrado de la caché — buscar por el basename de la URL.
     if [ -n "$CHECKSUM_URL" ]; then
+        local REMOTE_NAME
+        REMOTE_NAME=$(basename "$IMAGE_URL")
         local ATTEMPT=1
         while : ; do
             echo -e "${BLUE}🔐 Verificando integridad de la imagen (${CHECKSUM_ALGO}) [intento $ATTEMPT/2]...${NC}"
@@ -227,10 +256,10 @@ select_os_and_download() {
                 break
             fi
             local EXPECTED
-            EXPECTED=$(awk -v n="$IMAGE_NAME" '$2==n || $2=="*"n {print $1; exit}' "$SUMS_FILE")
+            EXPECTED=$(awk -v n="$REMOTE_NAME" '$2==n || $2=="*"n {print $1; exit}' "$SUMS_FILE")
             rm -f "$SUMS_FILE"
             if [ -z "$EXPECTED" ]; then
-                echo -e "${YELLOW}⚠️  No se encontró entry para '$IMAGE_NAME' en el archivo de sumas. Saltando verificación.${NC}"
+                echo -e "${YELLOW}⚠️  No se encontró entry para '$REMOTE_NAME' en el archivo de sumas. Saltando verificación.${NC}"
                 break
             fi
             local ACTUAL
@@ -256,12 +285,26 @@ select_os_and_download() {
             echo -e "${YELLOW}   En caché: $ACTUAL${NC}"
             echo -e "${YELLOW}   Re-descargando imagen...${NC}"
             rm -f "$FILE_PATH"
-            if ! wget -q --show-progress --tries=3 --timeout=30 -O "$FILE_PATH" "$IMAGE_URL"; then
-                echo -e "${RED}❌ Falló la re-descarga.${NC}"; rm -f "$FILE_PATH"; exit 1
+            if ! wget -q --show-progress --tries=3 --timeout=30 -O "${FILE_PATH}.part" "$IMAGE_URL"; then
+                echo -e "${RED}❌ Falló la re-descarga.${NC}"; rm -f "${FILE_PATH}.part"; exit 1
             fi
+            mv "${FILE_PATH}.part" "$FILE_PATH"
             FRESHLY_DOWNLOADED=true
             ATTEMPT=$((ATTEMPT+1))
         done
+    fi
+
+    # Tamaño virtual de la imagen = disco mínimo de la VM: qm resize no puede
+    # ENCOGER un disco, así que pedir menos que esto haría fallar el deploy
+    # (Debian 13 genericcloud = 3G, Ubuntu noble = 3.5G...). Redondeo hacia arriba.
+    if command -v qemu-img >/dev/null 2>&1; then
+        local VSIZE
+        VSIZE=$(qemu-img info --output=json "$FILE_PATH" 2>/dev/null \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["virtual-size"])' 2>/dev/null || true)
+        if [[ "$VSIZE" =~ ^[0-9]+$ ]] && (( VSIZE > 0 )); then
+            IMG_MIN_GB=$(( (VSIZE + 1073741823) / 1073741824 ))
+            echo -e "  ${CYAN}ℹ️  Disco virtual de la imagen: ${IMG_MIN_GB} GB (mínimo aceptado para la VM)${NC}"
+        fi
     fi
 }
 
@@ -288,8 +331,14 @@ auto_select_image_storage() {
         STORAGE_IMG="${STORAGES_IMG[0]}"
         echo -e "  ${GREEN}✅ Storage único seleccionado: ${CYAN}$STORAGE_IMG${NC}"
     else
-        read -p "Selecciona storage para disco VM [1]: " IMG_IDX; IMG_IDX=${IMG_IDX:-1}
-        STORAGE_IMG="${STORAGES_IMG[$((IMG_IDX-1))]}"
+        while true; do
+            read -p "Selecciona storage para disco VM [1]: " IMG_IDX; IMG_IDX=${IMG_IDX:-1}
+            if [[ "$IMG_IDX" =~ ^[0-9]+$ ]] && (( IMG_IDX >= 1 && IMG_IDX <= ${#STORAGES_IMG[@]} )); then
+                STORAGE_IMG="${STORAGES_IMG[$((IMG_IDX-1))]}"
+                break
+            fi
+            echo -e "${RED}❌ Índice inválido. Selecciona un número del 1 al ${#STORAGES_IMG[@]}.${NC}"
+        done
         echo -e "${GREEN}✅ Storage seleccionado: ${CYAN}$STORAGE_IMG${NC}"
     fi
 
@@ -319,26 +368,22 @@ ask_snippet_storage() {
     STORAGE_SNIP="${STORAGES_SNIP[0]}"
     echo -e "${GREEN}✅ Snippets en: ${CYAN}$STORAGE_SNIP${NC} (único compatible)"
 
-    # Verificar contenido snippets habilitado
-    CURRENT_CONTENT=$(pvesm status | awk -v s="$STORAGE_SNIP" '$1==s {print $2}')
-    VALID_TYPES="images snippets iso vztmpl rootdir backup"
-    NEW_CONTENT=""
+    # Habilitar snippets PRESERVANDO el content real del storage. El content
+    # se lee de la API (/storage/<id>), no de `pvesm status` (cuya columna 2
+    # es el TIPO, no el content). Solo se AÑADE "snippets" si falta — jamás se
+    # reconstruye la lista, para no borrar tipos existentes (iso, vztmpl,
+    # backup, import de PVE 8.2+, etc.) de la config del nodo.
+    CURRENT_CONTENT=$(pvesh get "/storage/${STORAGE_SNIP}" --output-format json 2>/dev/null \
+        | python3 -c 'import json,sys;print(json.load(sys.stdin).get("content",""))' 2>/dev/null || true)
 
-    for type in ${CURRENT_CONTENT//,/ }; do
-        for valid in $VALID_TYPES; do
-            if [ "$type" == "$valid" ]; then
-                NEW_CONTENT="${NEW_CONTENT}${type},"
-            fi
-        done
-    done
-
-    [[ "$NEW_CONTENT" != *"snippets"* ]] && NEW_CONTENT="${NEW_CONTENT}snippets,"
-    [[ "$NEW_CONTENT" != *"images"* ]] && NEW_CONTENT="${NEW_CONTENT}images,"
-    NEW_CONTENT=$(echo "$NEW_CONTENT" | sed s/,$//)
-
-    if [ "$CURRENT_CONTENT" != "$NEW_CONTENT" ]; then
-        echo -e "${CYAN}🔧 Habilitando snippets en $STORAGE_SNIP...${NC}"
-        pvesm set "$STORAGE_SNIP" --content "$NEW_CONTENT" || true
+    if [ -n "$CURRENT_CONTENT" ]; then
+        if [[ ",${CURRENT_CONTENT}," != *",snippets,"* ]]; then
+            echo -e "${CYAN}🔧 Habilitando snippets en $STORAGE_SNIP (preservando: ${CURRENT_CONTENT})...${NC}"
+            pvesm set "$STORAGE_SNIP" --content "${CURRENT_CONTENT},snippets" || true
+        fi
+    else
+        # No se pudo leer el content: NO tocar la config del storage.
+        echo -e "${YELLOW}⚠️  No se pudo leer el content de ${STORAGE_SNIP}; si 'snippets' no está habilitado, actívalo manualmente (Datacenter → Storage).${NC}"
     fi
 
     local SNIP_BASE
@@ -361,8 +406,8 @@ ask_vmid_and_name() {
         
         if ! [[ "$VMID" =~ ^[0-9]+$ ]] || [ "$VMID" -lt 100 ]; then
             echo -e "${RED}❌ El ID debe ser un número ≥ 100.${NC}"
-        elif qm status "$VMID" &>/dev/null; then
-            echo -e "${RED}❌ El ID $VMID ya existe en este nodo. Elige otro.${NC}"
+        elif vmid_exists "$VMID"; then
+            echo -e "${RED}❌ El ID $VMID ya existe en el cluster (VM o CT, puede estar en otro nodo). Elige otro.${NC}"
         else
             break
         fi
@@ -400,7 +445,8 @@ ask_resources() {
     
     while true; do
         read -p "Disco GB [20]: " DISK; DISK=${DISK:-20}
-        [[ "$DISK" =~ ^[0-9]+$ ]] && (( DISK >= 2 )) || { echo -e "${RED}❌ Disco mínimo 2GB${NC}"; continue; }
+        # Mínimo = tamaño virtual de la imagen (qm resize no puede encoger)
+        [[ "$DISK" =~ ^[0-9]+$ ]] && (( DISK >= IMG_MIN_GB )) || { echo -e "${RED}❌ Disco mínimo ${IMG_MIN_GB}GB (la imagen ${IMAGE_NAME} no se puede encoger)${NC}"; continue; }
 
         local AVAIL_KB=$(pvesm status | awk -v s="$STORAGE_IMG" '$1==s {print $6}')
         if [[ -z "$AVAIL_KB" ]]; then break; fi
@@ -423,7 +469,13 @@ ask_auth_mode() {
     echo "1) Solo root + contraseña"
     echo "2) Solo clave SSH"
     echo "3) SSH + contraseña root (recomendado)"
-    read -p "Opción [3]: " AUTH_MODE; AUTH_MODE=${AUTH_MODE:-3}
+    # Validar: un typo aquí (ej. "4") dejaba una VM SIN password y SIN claves
+    # — completamente inaccesible, incluso por consola serial.
+    while true; do
+        read -p "Opción [3]: " AUTH_MODE; AUTH_MODE=${AUTH_MODE:-3}
+        [[ "$AUTH_MODE" =~ ^[123]$ ]] && break
+        echo -e "${RED}❌ Opción inválida. Debe ser 1, 2 o 3.${NC}"
+    done
 
     if [[ "$AUTH_MODE" == "1" ]] || [[ "$AUTH_MODE" == "3" ]]; then
         while true; do
@@ -457,7 +509,13 @@ ask_auth_mode() {
         echo -e "${YELLOW}Pega tus claves SSH públicas (una por línea, presiona Enter en una línea vacía para terminar):${NC}"
         while IFS= read -r line; do
             [[ -z "$line" ]] && break
-            SSH_KEYS+=("$line")
+            # Validar formato: una clave truncada/typo en modo 2 = VM inaccesible
+            if ssh-keygen -lf /dev/stdin <<< "$line" >/dev/null 2>&1; then
+                SSH_KEYS+=("$line")
+                echo -e "  ${GREEN}✅ Clave válida agregada (${#SSH_KEYS[@]}).${NC}"
+            else
+                echo -e "  ${RED}❌ No parece una clave pública SSH válida — ignorada. Pega otra o Enter para terminar.${NC}"
+            fi
         done
         if [[ "$AUTH_MODE" == "2" && ${#SSH_KEYS[@]} -eq 0 ]]; then
             echo -e "${RED}❌ Modo 'solo clave SSH' requiere al menos una clave. Abortando.${NC}"
@@ -479,7 +537,9 @@ ask_auth_mode() {
 ask_network() {
     echo -e "\n${BLUE}🌐 Configuración de Red${NC}"
 
-    mapfile -t BRIDGES < <(ip -br link show type bridge 2>/dev/null | awk '$2!="DOWN" && $1!~/^fwbr/ && $1!~/^vmbr[0-9]+v[0-9]/ {print $1}')
+    # Solo bridges de Proxmox (vmbrN): excluye docker0, fwbr*, y los
+    # sub-bridges vmbrXvY que crea el tagging VLAN en bridges legacy.
+    mapfile -t BRIDGES < <(ip -br link show type bridge 2>/dev/null | awk '$1 ~ /^vmbr[0-9]+$/ && $2!="DOWN" {print $1}')
     [ ${#BRIDGES[@]} -eq 0 ] && { echo -e "${RED}❌ No hay bridges principales activos (ej. vmbr0)${NC}"; exit 1; }
 
     if [ ${#BRIDGES[@]} -eq 1 ]; then
@@ -504,13 +564,15 @@ ask_network() {
         done
     fi
 
-    read -p "VLAN ID (Enter para omitir, sin VLAN): " VLAN_INPUT
-    if [[ -n "$VLAN_INPUT" ]]; then
-        if ! [[ "$VLAN_INPUT" =~ ^[0-9]+$ ]] || (( VLAN_INPUT < 1 || VLAN_INPUT > 4094 )); then
-            echo -e "${RED}❌ VLAN inválida (debe ser entre 1 y 4094)${NC}"; exit 1
+    while true; do
+        read -p "VLAN ID (Enter para omitir, sin VLAN): " VLAN_INPUT
+        [[ -z "$VLAN_INPUT" ]] && break
+        if [[ "$VLAN_INPUT" =~ ^[0-9]+$ ]] && (( VLAN_INPUT >= 1 && VLAN_INPUT <= 4094 )); then
+            VLAN_TAG=",tag=${VLAN_INPUT}"
+            break
         fi
-        VLAN_TAG=",tag=${VLAN_INPUT}"
-    fi
+        echo -e "${RED}❌ VLAN inválida (debe ser entre 1 y 4094)${NC}"
+    done
 
     while true; do
         read -p "IPv4 (ej. 192.168.1.100): " IPV4_VAL
@@ -549,15 +611,35 @@ ask_network() {
         DEFAULT_DNS="8.8.8.8 1.1.1.1"
     fi
 
-    read -p "DNS [$DEFAULT_DNS]: " DNS_INPUT
-    DNS_SERVERS=${DNS_INPUT:-$DEFAULT_DNS}
+    # Validar DNS: estos valores acaban dentro de dos YAMLs y en --nameserver;
+    # texto arbitrario rompería la resolución del guest en silencio.
+    local ns dns_ok
+    while true; do
+        read -p "DNS [$DEFAULT_DNS]: " DNS_INPUT
+        DNS_SERVERS=${DNS_INPUT:-$DEFAULT_DNS}
+        dns_ok=true
+        for ns in $DNS_SERVERS; do
+            if ! valid_ipv4 "$ns" && ! valid_ipv6_addr "$ns"; then
+                dns_ok=false
+                echo -e "${RED}❌ '$ns' no es una IP válida (separa varios DNS con espacios)${NC}"
+                break
+            fi
+        done
+        [ "$dns_ok" = true ] && break
+    done
 
     # MAC fija con el OUI de Proxmox (BC:24:11). Se fija en net0 y se usa para
     # emparejar la interfaz por MAC en el network-config, en vez de por nombre
     # (ens18/enp*sN) o por driver — matchear por driver no se traduce al
     # renderer v1/ENI de Debian (que no trae netplan) y deja la VM sin ruta.
     # Emparejar por MAC funciona en cualquier Proxmox y renderer (ENI/networkd/netplan).
-    VM_MAC=$(printf 'bc:24:11:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))
+    # Se regenera si colisiona con alguna VM/CT existente del cluster (los
+    # configs guardan la MAC en mayúsculas → grep -i).
+    while : ; do
+        VM_MAC=$(printf 'bc:24:11:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))
+        grep -riqs "$VM_MAC" /etc/pve/nodes/*/qemu-server/ /etc/pve/nodes/*/lxc/ 2>/dev/null || break
+        echo -e "  ${YELLOW}⚠️  MAC ${VM_MAC} ya usada por otra VM/CT — regenerando...${NC}"
+    done
 }
 
 # ==============================================================================
@@ -576,12 +658,15 @@ confirm_deployment() {
     echo -e "Hardware : ${RAM} MB RAM / ${CPU} Cores (cpu=${CPU_TYPE}${STORAGE_SSD_FLAG:+, ssd=1})"
 
     read -p "✅ ¿Desplegar VM ahora? (s/N): " CONFIRM
-    
-    if [[ "${CONFIRM,,}" != "s" ]]; then
-        echo -e "${YELLOW}Operación cancelada.${NC}"
-        SUCCESS=true
-        exit 0
-    fi
+
+    case "${CONFIRM,,}" in
+        s|si|sí) ;;
+        *)
+            echo -e "${YELLOW}Operación cancelada.${NC}"
+            SUCCESS=true
+            exit 0
+            ;;
+    esac
     
     return 0
 }
@@ -686,12 +771,15 @@ EOF
     [ "$IPV4_CIDR" -eq 32 ] && NP_ONLINK=$'\n              on-link: true'
 
     if [[ "$OS_TYPE" == "ubuntu" ]]; then
+        # bootcmd corre en CADA arranque: envolver en cloud-init-per instance
+        # para que el resolv.conf temporal (DNS durante la fase de paquetes)
+        # solo se escriba en el primer boot y no pise en cada reinicio el
+        # symlink a systemd-resolved que configura runcmd.
         cat >> "$YAML_FILE" << EOF
 
 bootcmd:
   - |
-    rm -f /etc/resolv.conf
-    for ns in ${DNS_SERVERS}; do echo "nameserver \$ns" >> /etc/resolv.conf; done
+    cloud-init-per instance deploy-dns sh -c 'rm -f /etc/resolv.conf; for ns in ${DNS_SERVERS}; do echo "nameserver \$ns" >> /etc/resolv.conf; done'
 
 runcmd:
   - test -f /etc/sysctl.d/99-ipv6-static.conf && sysctl -p /etc/sysctl.d/99-ipv6-static.conf || true
@@ -724,6 +812,7 @@ runcmd:
           nameservers:
             addresses: [${DNS_SERVERS// /, }]
     NPEOF
+    chmod 600 /etc/netplan/99-cloud-init-override.yaml
   - |
     install -d -m 0755 /etc/ssh/sshd_config.d /run/sshd
     chmod 0755 /run/sshd
@@ -736,12 +825,13 @@ runcmd:
     sshd -t && systemctl reset-failed ssh && systemctl restart ssh
 EOF
     else
+        # Igual que en Ubuntu: solo el primer boot (en Debian resolvconf
+        # gestiona /etc/resolv.conf después del deploy).
         cat >> "$YAML_FILE" << EOF
 
 bootcmd:
   - |
-    rm -f /etc/resolv.conf
-    for ns in ${DNS_SERVERS}; do echo "nameserver \$ns" >> /etc/resolv.conf; done
+    cloud-init-per instance deploy-dns sh -c 'rm -f /etc/resolv.conf; for ns in ${DNS_SERVERS}; do echo "nameserver \$ns" >> /etc/resolv.conf; done'
 
 runcmd:
   - test -f /etc/sysctl.d/99-ipv6-static.conf && sysctl -p /etc/sysctl.d/99-ipv6-static.conf || true
@@ -766,7 +856,9 @@ runcmd:
 EOF
     fi
 
-    if command -v python3 >/dev/null; then
+    # Distinguir "PyYAML no instalado" (saltar validación) de "YAML inválido"
+    # (abortar) — antes un python3 sin python3-yaml abortaba con falso error.
+    if command -v python3 >/dev/null && python3 -c "import yaml" 2>/dev/null; then
         if python3 -c "import yaml; yaml.safe_load(open('${YAML_FILE}'))" 2>/dev/null; then
             echo -e "  ${GREEN}✅ YAML generado y validado correctamente por Python.${NC}"
         else
@@ -888,7 +980,9 @@ Desplegado: $(date '+%Y-%m-%d %H:%M') - ${IMAGE_NAME}"
     } >> "$LOG_FILE" 2>&1
 
     echo -e "\n${BLUE}⏳ Esperando a que el Guest Agent responda (cloud-init terminó)...${NC}"
-    local WAIT_MAX=300 WAITED=0
+    # 600s: con package_upgrade=true y un mirror lento, 300s daba falsos
+    # "revisa cloud-init manualmente" en VMs que terminaban bien.
+    local WAIT_MAX=600 WAITED=0
     while (( WAITED < WAIT_MAX )); do
         if qm guest cmd "$VMID" ping &>/dev/null; then
             echo -e "${GREEN}✅ Guest Agent activo tras ${WAITED}s.${NC}"

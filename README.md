@@ -103,6 +103,35 @@ chmod +x /root/deploy-vm.sh
 Es interactivo. Al terminar imprime cómo entrar (`qm terminal <vmid>` /
 `ssh root@<ip>`) y dónde quedó el log del despliegue.
 
+## Robustez (v8.1)
+
+Auditoría completa + suite de pruebas con stubs (`qm`/`pvesh`/`pvesm` falsos,
+descargas y checksums reales). Correcciones principales:
+
+- **`set -E` + trap en `EXIT`**: antes el trap ERR no se heredaba dentro de
+  funciones — un fallo de `qm create`/`qm resize` moría en silencio sin
+  rollback (la salida iba al log). Ahora todo camino de fallo limpia la VM
+  parcial y los snippets.
+- **Checksum de Ubuntu**: nunca se verificaba — el archivo de sumas upstream
+  usa el nombre original (`noble-server-cloudimg-amd64.img`) y se buscaba el
+  nombre renombrado de la caché. Ahora se busca por el basename de la URL.
+- **Disco mínimo = tamaño virtual de la imagen** (leído con `qemu-img info`):
+  `qm resize` no puede encoger; pedir 2 GB con una imagen de 3.5 GB fallaba.
+- **Modo de autenticación validado**: un typo (ej. "4") creaba una VM sin
+  password y sin claves — inaccesible. Las claves SSH pegadas se validan con
+  `ssh-keygen -lf`; DNS, VLAN e índices de menú también se validan/reintentan.
+- **`pvesm set --content` preserva el content real** del storage (leído de la
+  API): antes reconstruía la lista desde una whitelist y podía borrar tipos
+  (`import`, etc.) de la config del nodo.
+- **VMID verificado a nivel cluster** (`/cluster/resources`), no solo local.
+- **Descarga a `.part`** + rename al completar: una descarga interrumpida no
+  queda en caché como imagen "válida".
+- **MAC sin colisiones**: se regenera si ya existe en alguna VM/CT del cluster.
+- `bootcmd` del DNS temporal envuelto en `cloud-init-per instance` (antes
+  corría en cada boot y pisaba el resolv.conf definitivo), `chmod 600` del
+  override de netplan, timeout del guest-agent 300→600 s, solo bridges `vmbrN`
+  en el selector, y "si"/"sí" aceptados al confirmar.
+
 ## Notas
 
 - Las imágenes cloud quedan cacheadas en el nodo entre despliegues.
