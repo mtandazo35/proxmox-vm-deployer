@@ -20,7 +20,7 @@ VMID=""; NOMBRE=""; RAM=""; CPU=""; DISK=""
 AUTH_MODE=""; ROOT_PASS_HASH=""; SSH_PWAUTH="false"; SSHD_PASSWORD_AUTH="no"; SSH_KEYS=()
 BRIDGE=""; VLAN_TAG=""; IPV4_VAL=""; IPV4_CIDR=""; GW_IPV4=""
 IPV6_CONFIGURED=false; GW_IPV6=""; DNS_SERVERS=""
-OS_TYPE="debian"
+OS_TYPE="debian"; OS_PRETTY=""
 CPU_TYPE="host"; STORAGE_SSD_FLAG=""
 SUCCESS=false; ROLLBACK_EXECUTED=false; LOG_FILE=""; NETWORK_YAML_FILE=""; YAML_FILE=""
 VM_MAC=""; IMG_MIN_GB="2"; PERMIT_ROOT_LOGIN=""
@@ -178,6 +178,7 @@ select_os_and_download() {
         1)
             IMAGE_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
             IMAGE_NAME="debian-12-genericcloud-amd64.qcow2"
+            OS_PRETTY="Debian 12 (Bookworm)"
             CHECKSUM_URL="https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS"
             CHECKSUM_ALGO="sha512sum"
             OS_TYPE="debian"
@@ -185,6 +186,7 @@ select_os_and_download() {
         2)
             IMAGE_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
             IMAGE_NAME="debian-13-genericcloud-amd64.qcow2"
+            OS_PRETTY="Debian 13 (Trixie)"
             CHECKSUM_URL="https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
             CHECKSUM_ALGO="sha512sum"
             OS_TYPE="debian"
@@ -192,6 +194,7 @@ select_os_and_download() {
         3)
             IMAGE_URL="https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
             IMAGE_NAME="ubuntu-20.04-server-cloudimg-amd64.img"
+            OS_PRETTY="Ubuntu 20.04 LTS (Focal)"
             CHECKSUM_URL="https://cloud-images.ubuntu.com/focal/current/SHA256SUMS"
             CHECKSUM_ALGO="sha256sum"
             OS_TYPE="ubuntu"
@@ -199,6 +202,7 @@ select_os_and_download() {
         4)
             IMAGE_URL="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
             IMAGE_NAME="ubuntu-22.04-server-cloudimg-amd64.img"
+            OS_PRETTY="Ubuntu 22.04 LTS (Jammy)"
             CHECKSUM_URL="https://cloud-images.ubuntu.com/jammy/current/SHA256SUMS"
             CHECKSUM_ALGO="sha256sum"
             OS_TYPE="ubuntu"
@@ -206,6 +210,7 @@ select_os_and_download() {
         5)
             IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
             IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
+            OS_PRETTY="Ubuntu 24.04 LTS (Noble)"
             CHECKSUM_URL="https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
             CHECKSUM_ALGO="sha256sum"
             OS_TYPE="ubuntu"
@@ -944,11 +949,45 @@ deploy_vm() {
     local NET_QUEUES=""
     (( CPU > 1 )) && NET_QUEUES=",queues=${CPU}"
 
-    local VM_DESCRIPTION="IP: ${IPV4_VAL}/${IPV4_CIDR}"
+    # Notas de la VM: Proxmox renderiza Markdown en el panel Notes — se
+    # documenta TODO lo usado en el despliegue, legible de un vistazo.
+    local AUTH_DESC
+    case "$AUTH_MODE" in
+        1) AUTH_DESC="root + contraseña" ;;
+        2) AUTH_DESC="solo clave SSH (${#SSH_KEYS[@]} clave/s — password deshabilitado)" ;;
+        3) AUTH_DESC="clave SSH (${#SSH_KEYS[@]} clave/s) + contraseña root" ;;
+    esac
+
+    local VM_DESCRIPTION="# ${NOMBRE}  ·  VM ${VMID}
+
+**${OS_PRETTY}**
+
+## 🌐 Red
+
+- **IPv4:** \`${IPV4_VAL}/${IPV4_CIDR}\`  →  gateway ${GW_IPV4}"
     [ "$IPV6_CONFIGURED" = true ] && VM_DESCRIPTION="${VM_DESCRIPTION}
-IPv6: ${IPV6_VAL}"
+- **IPv6:** \`${IPV6_VAL}\`  →  gateway ${GW_IPV6}"
     VM_DESCRIPTION="${VM_DESCRIPTION}
-Desplegado: $(date '+%Y-%m-%d %H:%M') - ${IMAGE_NAME}"
+- **Bridge:** ${BRIDGE}${VLAN_TAG:+  ·  VLAN ${VLAN_TAG#,tag=}}
+- **MAC net0:** \`${VM_MAC}\`  (interfaz emparejada por MAC)
+- **DNS:** ${DNS_SERVERS}
+
+## ⚙️ Hardware
+
+- **CPU:** ${CPU} core(s)  ·  tipo \`${CPU_TYPE}\`${NET_QUEUES:+  ·  red multiqueue}
+- **RAM:** ${RAM} MB
+- **Disco:** ${DISK} GB en **${STORAGE_IMG}**${STORAGE_SSD_FLAG:+  ·  SSD (discard/TRIM)}
+
+## 💿 Sistema
+
+- **SO:** ${OS_PRETTY}
+- **Imagen oficial:** ${IMAGE_NAME}
+- **Hostname:** \`${NOMBRE,,}.internal\`  ·  zona horaria America/Guayaquil
+- **Acceso:** ${AUTH_DESC}
+
+---
+📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.1
+📝 Log: ${LOG_FILE}"
 
     {
         echo "[1/3] Creando estructura base de la VM..."
