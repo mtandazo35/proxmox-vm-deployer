@@ -289,11 +289,15 @@ select_os_and_download() {
             echo -e "${YELLOW}   Esperado: $EXPECTED${NC}"
             echo -e "${YELLOW}   En caché: $ACTUAL${NC}"
             echo -e "${YELLOW}   Re-descargando imagen...${NC}"
-            rm -f "$FILE_PATH"
+            # NO borrar la caché vieja todavía: si la re-descarga falla (mirror
+            # caído/intermitente), conservamos la imagen anterior en vez de
+            # quedarnos sin nada y re-descargar completo en la próxima corrida.
             if ! wget -q --show-progress --tries=3 --timeout=30 -O "${FILE_PATH}.part" "$IMAGE_URL"; then
-                echo -e "${RED}❌ Falló la re-descarga.${NC}"; rm -f "${FILE_PATH}.part"; exit 1
+                rm -f "${FILE_PATH}.part"
+                echo -e "${RED}❌ Falló la re-descarga. Se conserva la imagen anterior en caché (build vieja).${NC}"
+                exit 1
             fi
-            mv "${FILE_PATH}.part" "$FILE_PATH"
+            mv -f "${FILE_PATH}.part" "$FILE_PATH"
             FRESHLY_DOWNLOADED=true
             ATTEMPT=$((ATTEMPT+1))
         done
