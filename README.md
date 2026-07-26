@@ -112,6 +112,43 @@ explícitamente ("No se hicieron cambios en el nodo").
 
 ---
 
+## Selección automática de mirror
+
+Antes de descargar, el instalador **mide qué mirror responde más rápido desde
+ese nodo** (sondas de 256 KB en paralelo, techo ~8 s) y usa el ganador tanto
+para la imagen como para el archivo de checksums — ambos del *mismo* mirror,
+porque si vinieran de mirrors con distinta sincronización el hash no cuadraría
+y el script entraría en una re-descarga innecesaria.
+
+**Por qué hace falta:** `cloud.debian.org` y `cdimage.debian.org` son
+round-robin DNS sobre el mismo clúster. Cuando alguna de sus IPs está caída,
+`wget` se engancha a la IP muerta y se queda **minutos** colgado sin mostrar
+progreso (parece que "no descarga"). Los backends individuales del clúster
+permiten esquivarla:
+
+```
+🌎 Midiendo mirrors para elegir el más rápido...
+  gemmei.ftp.acc.umu.se            1577 ms
+  laotzu.ftp.acc.umu.se            1576 ms
+  saimei.ftp.acc.umu.se            2376 ms
+  ✅ Mirror elegido: laotzu.ftp.acc.umu.se
+```
+
+(En esa corrida real, los dos frontends no respondieron y quedaron descartados
+automáticamente.)
+
+**Sobre "el mirror más cercano":** las imágenes cloud de Debian **no están
+espejadas en América**. Se verificó contra la lista oficial de mirrors de
+Debian: los espejos regionales (incluido `mirror.cedia.org.ec`, la red
+académica de Ecuador, y los de Brasil/Argentina/EE.UU.) sirven `debian-cd`
+(las ISOs) pero **no** el árbol `cloud/` — todos devuelven 404. El único
+origen es el clúster de `ftp.acc.umu.se` (Suecia), así que lo mejor
+alcanzable es elegir su backend más rápido, que es lo que hace el script.
+
+Para **Ubuntu** no hay nada que medir: `cloud-images.ubuntu.com` ya es un CDN
+con geo-routing que sirve desde el POP más cercano (por eso baja rápido), así
+que con un solo candidato la sonda se salta y no cuesta tiempo.
+
 ## Detección genérica (no asume el hardware del nodo)
 
 - **`cpu=`** — `host` en standalone; `x86-64-v2-AES` si hay

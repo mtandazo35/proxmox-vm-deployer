@@ -14,7 +14,7 @@ set -Eeuo pipefail
 # ==================== GLOBALES Y COLORES ====================
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-IMAGE_URL=""; IMAGE_NAME=""; FILE_PATH=""; CHECKSUM_URL=""; CHECKSUM_ALGO=""
+IMAGE_URL=""; IMAGE_RELPATH=""; IMAGE_NAME=""; FILE_PATH=""; CHECKSUM_URL=""; CHECKSUM_ALGO=""
 STORAGE_IMG=""; STORAGE_SNIP=""; SNIPPET_FULL_PATH=""
 VMID=""; NOMBRE=""; RAM=""; CPU=""; DISK=""
 AUTH_MODE=""; ROOT_PASS_HASH=""; SSH_PWAUTH="false"; SSHD_PASSWORD_AUTH="no"; SSH_KEYS=()
@@ -56,6 +56,53 @@ vmid_exists() {
         fi
     fi
     qm status "$id" &>/dev/null
+}
+
+# Mide qué mirror responde más rápido DESDE ESTE NODO y devuelve su URL base.
+# Las sondas (512 KB con timeout corto) corren EN PARALELO, así un mirror
+# colgado cuesta el timeout una sola vez y no la suma de todos. Resuelve el
+# caso real de los frontends round-robin (cloud.debian.org / cdimage.debian.org)
+# cuyo pool a veces tiene IPs muertas: wget se quedaba minutos esperando.
+pick_fastest_mirror() {
+    local relpath="$1"; shift
+    local tmpdir base host f i=0 pids=() winner="" line
+
+    # Un solo candidato: nada que medir (ej. el CDN de Ubuntu ya geo-rutea).
+    if [ $# -eq 1 ]; then echo "$1"; return 0; fi
+
+    tmpdir=$(mktemp -d) || { echo "$1"; return 0; }
+    echo -e "\n${BLUE}🌎 Midiendo mirrors para elegir el más rápido...${NC}" >&2
+
+    for base in "$@"; do
+        (
+            probe_start=$(date +%s%N)
+            if timeout 8 wget -q --tries=1 --timeout=6 \
+                 --header="Range: bytes=0-262143" -O /dev/null "${base}/${relpath}" 2>/dev/null; then
+                probe_end=$(date +%s%N)
+                echo "$(( (probe_end - probe_start) / 1000000 )) ${base}" > "${tmpdir}/${i}"
+            fi
+        ) &
+        pids+=("$!")
+        i=$((i+1))
+    done
+    wait "${pids[@]}" 2>/dev/null || true
+
+    for f in "$tmpdir"/*; do
+        [ -f "$f" ] || continue
+        line=$(cat "$f")
+        host=$(echo "${line#* }" | cut -d/ -f3)
+        printf "  ${CYAN}%-30s %6s ms${NC}\n" "$host" "${line%% *}" >&2
+    done
+
+    winner=$(cat "$tmpdir"/* 2>/dev/null | sort -n | head -1 | cut -d' ' -f2-) || true
+    rm -rf "$tmpdir"
+
+    if [ -z "$winner" ]; then
+        echo -e "  ${YELLOW}⚠️  Ningún mirror respondió a la sonda; se usará el primero de la lista.${NC}" >&2
+        return 1
+    fi
+    echo -e "  ${GREEN}✅ Mirror elegido: $(echo "$winner" | cut -d/ -f3)${NC}" >&2
+    echo "$winner"
 }
 
 # ==================== FUNCIONES DE DETECCIÓN (GENÉRICO PARA CUALQUIER NODO) ====================
@@ -176,42 +223,37 @@ select_os_and_download() {
 
     case "$OS_OPT" in
         1)
-            IMAGE_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+            IMAGE_RELPATH="bookworm/latest/debian-12-genericcloud-amd64.qcow2"
             IMAGE_NAME="debian-12-genericcloud-amd64.qcow2"
             OS_PRETTY="Debian 12 (Bookworm)"
-            CHECKSUM_URL="https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS"
             CHECKSUM_ALGO="sha512sum"
             OS_TYPE="debian"
             ;;
         2)
-            IMAGE_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+            IMAGE_RELPATH="trixie/latest/debian-13-genericcloud-amd64.qcow2"
             IMAGE_NAME="debian-13-genericcloud-amd64.qcow2"
             OS_PRETTY="Debian 13 (Trixie)"
-            CHECKSUM_URL="https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
             CHECKSUM_ALGO="sha512sum"
             OS_TYPE="debian"
             ;;
         3)
-            IMAGE_URL="https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+            IMAGE_RELPATH="focal/current/focal-server-cloudimg-amd64.img"
             IMAGE_NAME="ubuntu-20.04-server-cloudimg-amd64.img"
             OS_PRETTY="Ubuntu 20.04 LTS (Focal)"
-            CHECKSUM_URL="https://cloud-images.ubuntu.com/focal/current/SHA256SUMS"
             CHECKSUM_ALGO="sha256sum"
             OS_TYPE="ubuntu"
             ;;
         4)
-            IMAGE_URL="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+            IMAGE_RELPATH="jammy/current/jammy-server-cloudimg-amd64.img"
             IMAGE_NAME="ubuntu-22.04-server-cloudimg-amd64.img"
             OS_PRETTY="Ubuntu 22.04 LTS (Jammy)"
-            CHECKSUM_URL="https://cloud-images.ubuntu.com/jammy/current/SHA256SUMS"
             CHECKSUM_ALGO="sha256sum"
             OS_TYPE="ubuntu"
             ;;
         5)
-            IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+            IMAGE_RELPATH="noble/current/noble-server-cloudimg-amd64.img"
             IMAGE_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
             OS_PRETTY="Ubuntu 24.04 LTS (Noble)"
-            CHECKSUM_URL="https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
             CHECKSUM_ALGO="sha256sum"
             OS_TYPE="ubuntu"
             ;;
@@ -219,6 +261,37 @@ select_os_and_download() {
             echo -e "${RED}❌ Opción inválida.${NC}"; exit 1
             ;;
     esac
+
+    # Mirrors candidatos. Se mide cuál responde más rápido DESDE ESTE NODO y se
+    # usa ese para imagen y checksums (ambos del MISMO mirror: si vinieran de
+    # mirrors con sincronización distinta, el hash no cuadraría y el script
+    # entraría en re-descarga innecesaria).
+    local MIRRORS=()
+    if [ "$OS_TYPE" = "debian" ]; then
+        # cloud.debian.org y cdimage.debian.org son round-robin sobre el mismo
+        # clúster; cuando una de sus IPs está caída wget se cuelga varios
+        # minutos. Los backends individuales permiten esquivar la IP muerta.
+        MIRRORS=(
+            "https://cloud.debian.org/images/cloud"
+            "https://cdimage.debian.org/cdimage/cloud"
+            "https://gemmei.ftp.acc.umu.se/cdimage/cloud"
+            "https://laotzu.ftp.acc.umu.se/cdimage/cloud"
+            "https://saimei.ftp.acc.umu.se/cdimage/cloud"
+        )
+    else
+        # cloud-images.ubuntu.com ya es un CDN con geo-routing: sirve desde el
+        # POP más cercano al nodo, así que no hay nada que medir (un solo
+        # candidato = la sonda se salta y no cuesta tiempo).
+        MIRRORS=("https://cloud-images.ubuntu.com")
+    fi
+
+    local BASE_URL
+    BASE_URL=$(pick_fastest_mirror "$IMAGE_RELPATH" "${MIRRORS[@]}") || BASE_URL="${MIRRORS[0]}"
+
+    IMAGE_URL="${BASE_URL}/${IMAGE_RELPATH}"
+    local SUMS_NAME
+    [ "$CHECKSUM_ALGO" = "sha512sum" ] && SUMS_NAME="SHA512SUMS" || SUMS_NAME="SHA256SUMS"
+    CHECKSUM_URL="${BASE_URL}/$(dirname "$IMAGE_RELPATH")/${SUMS_NAME}"
 
     FILE_PATH="/var/lib/vz/template/iso/$IMAGE_NAME"
     mkdir -p "/var/lib/vz/template/iso"
