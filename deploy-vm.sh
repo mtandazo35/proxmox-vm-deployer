@@ -234,7 +234,7 @@ select_os_and_download() {
     local FRESHLY_DOWNLOADED=false
     if [ ! -f "$FILE_PATH" ]; then
         echo -e "${YELLOW}📥 Descargando imagen oficial ($IMAGE_NAME)...${NC}"
-        if ! wget -q --show-progress --tries=3 --timeout=30 --continue -O "${FILE_PATH}.part" "$IMAGE_URL"; then
+        if ! wget -q --show-progress --tries=5 --waitretry=10 --timeout=30 --continue -O "${FILE_PATH}.part" "$IMAGE_URL"; then
             echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; rm -f "${FILE_PATH}.part"; exit 1
         fi
         mv "${FILE_PATH}.part" "$FILE_PATH"
@@ -292,7 +292,7 @@ select_os_and_download() {
             # NO borrar la caché vieja todavía: si la re-descarga falla (mirror
             # caído/intermitente), conservamos la imagen anterior en vez de
             # quedarnos sin nada y re-descargar completo en la próxima corrida.
-            if ! wget -q --show-progress --tries=3 --timeout=30 -O "${FILE_PATH}.part" "$IMAGE_URL"; then
+            if ! wget -q --show-progress --tries=5 --waitretry=10 --timeout=30 -O "${FILE_PATH}.part" "$IMAGE_URL"; then
                 rm -f "${FILE_PATH}.part"
                 echo -e "${RED}❌ Falló la re-descarga. Se conserva la imagen anterior en caché (build vieja).${NC}"
                 exit 1
