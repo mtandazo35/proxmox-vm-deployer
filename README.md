@@ -6,6 +6,26 @@ hardcodear nada del hardware donde se probó.
 
 Soporta Debian 12/13 y Ubuntu 20.04/22.04/24.04 (genericcloud / cloud images).
 
+## ⚡ Quick install (one-liner)
+
+Desde la consola del nodo Proxmox (como `root`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/proxmox-vm-deployer/master/deploy-vm.sh -o /root/deploy-vm.sh && chmod +x /root/deploy-vm.sh && /root/deploy-vm.sh
+```
+
+Descarga la última versión a `/root/deploy-vm.sh`, la hace ejecutable y arranca
+el asistente. Deja el script en `/root/` para reutilizarlo (`/root/deploy-vm.sh`).
+
+> El asistente es **interactivo**, así que no uses `curl ... | bash`: el pipe
+> ocupa `stdin` y los menús (`read`) dejan de leer el teclado. Descarga primero
+> (como arriba) o, si prefieres no dejar copia en disco, usa sustitución de
+> proceso, que conserva `stdin` como la terminal:
+>
+> ```bash
+> bash <(curl -fsSL https://raw.githubusercontent.com/mtandazo35/proxmox-vm-deployer/master/deploy-vm.sh)
+> ```
+
 ## Qué hace
 
 Es un asistente por consola (`deploy-vm.sh`) que:
