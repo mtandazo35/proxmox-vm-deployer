@@ -41,11 +41,11 @@ El asistente (`deploy-vm.sh`) recorre estas fases:
    `.part` que solo se renombra al completarse, para que una descarga
    interrumpida jamás quede en caché como imagen "válida") y se **verifica
    contra el checksum oficial** del upstream (SHA512 Debian / SHA256 Ubuntu).
-   Si la caché quedó obsoleta porque upstream publicó una build nueva, se
-   re-descarga sola; si una descarga fresca no matchea, se aborta (posible
-   corrupción o alteración). También se lee el **tamaño virtual** de la imagen
-   con `qemu-img info` — ese es el disco mínimo aceptado después (un
-   `qm resize` nunca puede encoger).
+   La caché está **indexada por build** (ver abajo), así que una imagen ya
+   descargada no se vuelve a bajar nunca. Si una descarga fresca no matchea el
+   checksum, se aborta (posible corrupción o alteración). También se lee el
+   **tamaño virtual** de la imagen con `qemu-img info` — ese es el disco mínimo
+   aceptado después (un `qm resize` nunca puede encoger).
 2. **Detección de CPU** — `cpu=host` si el nodo es standalone (máximo
    rendimiento); `x86-64-v2-AES` si existe `/etc/pve/corosync.conf` (cluster),
    para no romper la migración en vivo entre nodos con CPUs distintas.
@@ -281,10 +281,75 @@ cubierto por la suite de pruebas (`tests/`). En orden de gravedad:
 
 ---
 
-## Suite de pruebas (`tests/run-tests.sh`)
+## v8.2 — la caché de imágenes ya no caduca sola
 
-Banco de pruebas de **55 aserciones** que corre en cualquier Debian SIN
-Proxmox (se usó un VPS limpio). Los comandos PVE se **stubean** —
+**El síntoma:** cada dos por tres había que esperar 350 MB de descarga aunque la
+imagen ya estuviera en el nodo.
+
+**La causa:** `trixie/latest/` (Debian) y `noble/current/` (Ubuntu) son punteros
+**móviles**. El upstream republica la imagen cada 1-2 semanas y el checksum
+cambia con ella — Debian sacó builds de trixie el 1, 15 y 23 de junio, el 6, 12
+y 22 de julio, y el 3 y 10 de agosto de 2026; bookworm llegó a publicar dos días
+seguidos. Como el script guardaba la imagen bajo un nombre fijo y la validaba
+contra el checksum de `latest/`, la caché **se invalidaba sola en cada rebuild**
+y se re-descargaba entera aunque el archivo local estuviera perfecto.
+
+**El arreglo:** la caché se indexa por build. El nombre en disco lleva los 12
+primeros caracteres del hash:
+
+```
+/var/lib/vz/template/iso/debian-13-genericcloud-amd64-0ce1f1d67573.qcow2
+```
+
+De ahí salen tres propiedades:
+
+- Una build ya descargada **no se vuelve a bajar jamás**: si el hash que publica
+  el upstream ya está en disco, se verifica (lo que de paso detecta corrupción
+  en el disco) y se usa.
+- Cuando el upstream **sí** publicó algo nuevo, se avisa y **se ofrece** en vez
+  de imponerlo: `¿Usar la imagen en caché y no descargar? [S/n]`, mostrando la
+  antigüedad de la que tienes y cuántos MB pesa la nueva. El default es usar la
+  caché, porque cloud-init hace `package_upgrade` en el primer arranque y la VM
+  queda parcheada igual. Para automatizar: `IMAGE_REFRESH=never` (siempre caché)
+  o `IMAGE_REFRESH=always` (siempre la última).
+- Varias builds **conviven**, así que se puede volver a una anterior. Al terminar
+  se informa cuántas hay y cuánto ocupan, y se ofrece borrarlas — nunca se borra
+  nada sin preguntar.
+
+Extras que caen de lo mismo: si el mirror falla teniendo una build previa en
+caché, se despliega con ella en vez de abortar; y si no se puede bajar el archivo
+de sumas, se reutiliza lo cacheado en lugar de descargar algo no verificable.
+
+**Migración automática:** los nodos que venían de v8.1 tienen el archivo con el
+nombre viejo. En la primera corrida se le calcula el hash y se reetiqueta, así
+que si resulta ser la build vigente **no se descarga nada**.
+
+---
+
+## Suite de pruebas
+
+Dos bancos de pruebas complementarios.
+
+### `tests/test-image-cache.sh` — caché de imágenes (41 aserciones)
+
+Corre en **segundos, sin red y sin Proxmox**: monta un upstream falso en un
+directorio temporal y stubea `wget`, de modo que se pueden forzar a voluntad
+casos que en la vida real tardan semanas en aparecer.
+
+```bash
+bash tests/test-image-cache.sh ./deploy-vm.sh
+```
+
+Cubre: primera descarga y nombre por build · segunda corrida sin descargar ·
+republicación del upstream con default = usar caché · elegir bajar la nueva
+conservando la vieja · `IMAGE_REFRESH=never|always` · migración del esquema
+v8.1 · caché corrupta · mirror caído con fallback a la build anterior ·
+upstream sin archivo de sumas · `prune_old_builds` sin TTY (informa, no borra).
+
+### `tests/run-tests.sh` — deploy completo E2E
+
+Corre en cualquier Debian SIN Proxmox (se usó un VPS limpio) y hace descargas y
+checksums **reales**. Los comandos PVE se **stubean** —
 `qm`/`pvesh`/`pvesm`/`ip` falsos que no crean nada real pero registran sus
 argumentos para asertar sobre ellos — mientras que descargas, checksums,
 `mkpasswd`, `ssh-keygen`, `findmnt`/`lsblk` y PyYAML son **reales**. Incluso
@@ -296,7 +361,7 @@ imagen de verdad.
 |-----|-----------|------------|
 | A | Debian 13 · auth 3 · IPv6 · VLAN 800 | Checksum sha512, hash SHA-512 real, match por MAC, ruta `::/0`, `cloud-init-per`, rechazo de: VMID ocupado en cluster, auth inválida, clave SSH basura, VLAN 5000, DNS no-IP; filtro de bridges; `pvesm set` preservando content; `tag=`/`queues=`/`cpu host`; permisos 600 |
 | B | Ubuntu 24.04 · solo clave · /32 | **Checksum sha256 por fin verificado**, disco mínimo 4 GB medido de la imagen, `on-link: true`, override netplan por MAC + chmod 600, `prohibit-password`, sin hash de password, sin multiqueue con 1 core |
-| C | `qm resize` falla a mitad del deploy | **El rollback se ejecuta** (fix `set -E`), destruye la VM parcial y borra los snippets — antes moría en silencio |
+| C | `qm resize` falla a mitad del deploy | **El rollback se ejecuta** (fix `set -E`), destruye la VM parcial y borra los snippets — antes moría en silencio. Además: la caché heredada de v8.1 se reetiqueta sin re-descargar y la 2ª corrida no baja nada |
 | D | Opción de SO inválida | Abort temprano limpio: "No se hicieron cambios en el nodo" |
 
 Para correrla:
@@ -306,7 +371,7 @@ scp deploy-vm.sh tests/run-tests.sh root@<host-debian>:/root/deploy-test/
 ssh root@<host-debian> "apt-get install -y python3-yaml && bash /root/deploy-test/run-tests.sh"
 ```
 
-Resultado esperado: `PASS: 55  FAIL: 0 — 🟢 TODAS LAS PRUEBAS PASARON`.
+Resultado esperado: `FAIL: 0 — 🟢 TODAS LAS PRUEBAS PASARON`.
 Descarga ~1 GB de imágenes reales la primera vez (quedan cacheadas en
 `/var/lib/vz/template/iso/`).
 
@@ -324,8 +389,9 @@ Es interactivo. Al terminar imprime cómo entrar (`qm terminal <vmid>` /
 
 ## Notas
 
-- Las imágenes cloud quedan cacheadas en el nodo entre despliegues (y se
-  re-verifican por checksum en cada uso).
+- Las imágenes cloud quedan cacheadas en el nodo entre despliegues, indexadas
+  por build y re-verificadas por checksum en cada uso. Una build ya descargada
+  no se vuelve a bajar (ver "v8.2" arriba).
 - El SO se instala con `qemu-guest-agent`; el instalador espera a que responda
   como confirmación de que cloud-init terminó.
 - Los snippets generados (`user-data-*.yaml` con el hash del password) quedan

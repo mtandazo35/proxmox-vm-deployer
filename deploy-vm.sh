@@ -1,12 +1,16 @@
 #!/bin/bash
 # ==============================================================================
-# Cloud-Init Proxmox - Instalador Modular V8.1
+# Cloud-Init Proxmox - Instalador Modular V8.2
 # Cambios 8.0: red por MAC fija (OUI Proxmox) en vez de match por driver/nombre
 # Cambios 8.1: set -E + trap EXIT (rollback cubre fallos dentro de funciones),
 # checksum por nombre remoto (Ubuntu nunca se verificaba), validación AUTH_MODE/
 # claves SSH/DNS/VLAN/índice storage, disco mínimo = tamaño virtual de la imagen,
 # pvesm set preserva content real, VMID chequeado a nivel cluster, descarga a
 # .part, MAC sin colisiones, bootcmd once-per-instance, netplan 600, timeout 600s
+# Cambios 8.2: caché de imágenes indexada por build (el nombre en disco lleva el
+# hash), así 'latest'/'current' al republicar ya no invalidan lo descargado; una
+# build nueva se ofrece en vez de imponerse (IMAGE_REFRESH=ask|never|always),
+# fallback a la build anterior si el mirror falla, y purga opcional de builds viejas
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -103,6 +107,63 @@ pick_fastest_mirror() {
     fi
     echo -e "  ${GREEN}✅ Mirror elegido: $(echo "$winner" | cut -d/ -f3)${NC}" >&2
     echo "$winner"
+}
+
+# ==================== CACHÉ DE IMÁGENES (INDEXADA POR BUILD) ====================
+# 'latest/' (Debian) y 'current/' (Ubuntu) son punteros MÓVILES: el upstream
+# republica la imagen cada 1-2 semanas y su checksum cambia con ella. Guardando
+# la imagen bajo un nombre fijo, la caché caducaba sola en cada rebuild y el
+# script re-descargaba ~350 MB aunque el archivo local estuviera intacto. Ahora
+# el nombre en disco lleva el hash de la build, así conviven varias y una build
+# ya descargada NUNCA se vuelve a bajar.
+
+# Descarga a .part y renombra al terminar: una descarga interrumpida jamás queda
+# en caché como si fuera una imagen completa.
+download_image() {
+    local url="$1" dest="$2"
+    echo -e "${YELLOW}📥 Descargando $(basename "$url")...${NC}"
+    if ! wget -q --show-progress --tries=5 --waitretry=10 --timeout=30 -O "${dest}.part" "$url"; then
+        rm -f "${dest}.part"
+        return 1
+    fi
+    mv -f "${dest}.part" "$dest"
+}
+
+# Builds de la misma familia ya presentes en caché, la más reciente primero.
+cache_builds() {
+    local dir="$1" base="$2" ext="$3"
+    ls -1t "${dir}/${base}-"*."${ext}" 2>/dev/null || true
+}
+
+# Tamaño de la descarga pendiente, solo para informar antes de preguntar.
+remote_size_mb() {
+    local url="$1" len
+    len=$(wget -qS --spider --timeout=8 --tries=1 "$url" 2>&1 \
+          | awk '/[Cc]ontent-[Ll]ength:/ {print $2}' | tr -d '\r' | tail -1)
+    if [[ "$len" =~ ^[0-9]+$ ]]; then echo $(( len / 1048576 )); else echo "?"; fi
+}
+
+# Cada rebuild del upstream deja atrás ~350 MB. Se avisa y se ofrece limpiar,
+# pero nunca se borra sin preguntar.
+prune_old_builds() {
+    local dir="$1" base="$2" ext="$3" keep="$4"
+    local old=() f total=0 R=""
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ "$f" = "$keep" ] && continue
+        old+=("$f")
+        total=$(( total + $(stat -c %s "$f" 2>/dev/null || echo 0) ))
+    done < <(cache_builds "$dir" "$base" "$ext")
+    if [ ${#old[@]} -eq 0 ]; then return 0; fi
+    echo -e "\n${CYAN}🧹 Builds antiguas en caché: ${#old[@]} ($(( total / 1048576 )) MB)${NC}"
+    printf "   %s\n" "${old[@]##*/}"
+    if [ ! -t 0 ]; then return 0; fi
+    read -r -p "   ¿Borrarlas? [s/N]: " R || R=""
+    if [[ "${R,,}" =~ ^(s|si|sí|y|yes)$ ]]; then
+        rm -f "${old[@]}"
+        echo -e "   ${GREEN}✅ Liberados $(( total / 1048576 )) MB.${NC}"
+    fi
+    return 0
 }
 
 # ==================== FUNCIONES DE DETECCIÓN (GENÉRICO PARA CUALQUIER NODO) ====================
@@ -293,88 +354,121 @@ select_os_and_download() {
     [ "$CHECKSUM_ALGO" = "sha512sum" ] && SUMS_NAME="SHA512SUMS" || SUMS_NAME="SHA256SUMS"
     CHECKSUM_URL="${BASE_URL}/$(dirname "$IMAGE_RELPATH")/${SUMS_NAME}"
 
-    FILE_PATH="/var/lib/vz/template/iso/$IMAGE_NAME"
-    mkdir -p "/var/lib/vz/template/iso"
+    local CACHE_DIR="/var/lib/vz/template/iso"
+    local IMG_BASE="${IMAGE_NAME%.*}" IMG_EXT="${IMAGE_NAME##*.}"
+    local LEGACY_PATH="${CACHE_DIR}/${IMAGE_NAME}"
+    mkdir -p "$CACHE_DIR"
 
     echo -e "\n${BLUE}🔍 Verificando conectividad y caché de imagen...${NC}"
     if ! wget -q --spider --timeout=5 "https://8.8.8.8" &>/dev/null && ! ping -c 1 8.8.8.8 &>/dev/null; then
          echo -e "${RED}❌ Sin conexión a Internet en el nodo Proxmox.${NC}"; exit 1
     fi
 
-    # Descarga (con posible re-descarga automática si el checksum no matchea el cache)
-    # Descargar a .part y renombrar al terminar: una descarga interrumpida
-    # jamás queda en caché como si fuera una imagen completa.
-    local FRESHLY_DOWNLOADED=false
-    if [ ! -f "$FILE_PATH" ]; then
-        echo -e "${YELLOW}📥 Descargando imagen oficial ($IMAGE_NAME)...${NC}"
-        if ! wget -q --show-progress --tries=5 --waitretry=10 --timeout=30 --continue -O "${FILE_PATH}.part" "$IMAGE_URL"; then
-            echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; rm -f "${FILE_PATH}.part"; exit 1
-        fi
-        mv "${FILE_PATH}.part" "$FILE_PATH"
-        FRESHLY_DOWNLOADED=true
-    else
-        echo -e "${GREEN}✅ Imagen '$IMAGE_NAME' encontrada en caché local.${NC}"
-    fi
-
-    # Verificar checksum oficial (re-descarga si el cache esta desactualizado).
-    # OJO: en el archivo de sumas upstream la imagen aparece con su nombre
-    # ORIGINAL (ej. noble-server-cloudimg-amd64.img), no con el nombre local
-    # renombrado de la caché — buscar por el basename de la URL.
+    # --- Qué build sirve el upstream AHORA, identificada por su checksum ---
+    # OJO: en el archivo de sumas la imagen aparece con su nombre ORIGINAL
+    # (ej. noble-server-cloudimg-amd64.img), no con el renombrado local.
+    local REMOTE_NAME EXPECTED=""
+    REMOTE_NAME=$(basename "$IMAGE_URL")
     if [ -n "$CHECKSUM_URL" ]; then
-        local REMOTE_NAME
-        REMOTE_NAME=$(basename "$IMAGE_URL")
-        local ATTEMPT=1
-        while : ; do
-            echo -e "${BLUE}🔐 Verificando integridad de la imagen (${CHECKSUM_ALGO}) [intento $ATTEMPT/2]...${NC}"
-            local SUMS_FILE
-            SUMS_FILE=$(mktemp)
-            if ! wget -q --tries=3 --timeout=15 -O "$SUMS_FILE" "$CHECKSUM_URL"; then
-                rm -f "$SUMS_FILE"
-                echo -e "${YELLOW}⚠️  No se pudo descargar el archivo de sumas. Saltando verificación.${NC}"
-                break
-            fi
-            local EXPECTED
+        local SUMS_FILE
+        SUMS_FILE=$(mktemp)
+        if wget -q --tries=3 --timeout=15 -O "$SUMS_FILE" "$CHECKSUM_URL"; then
             EXPECTED=$(awk -v n="$REMOTE_NAME" '$2==n || $2=="*"n {print $1; exit}' "$SUMS_FILE")
-            rm -f "$SUMS_FILE"
-            if [ -z "$EXPECTED" ]; then
-                echo -e "${YELLOW}⚠️  No se encontró entry para '$REMOTE_NAME' en el archivo de sumas. Saltando verificación.${NC}"
-                break
-            fi
-            local ACTUAL
-            ACTUAL=$($CHECKSUM_ALGO "$FILE_PATH" | awk '{print $1}')
-            if [ "$EXPECTED" = "$ACTUAL" ]; then
-                echo -e "${GREEN}✅ Checksum OK (${CHECKSUM_ALGO}).${NC}"
-                break
-            fi
-
-            # Mismatch
-            if [ "$FRESHLY_DOWNLOADED" = true ] || [ "$ATTEMPT" -ge 2 ]; then
-                # Descarga fresca y sigue fallando -> corrupta o MITM
-                echo -e "${RED}❌ Checksum MISMATCH tras descarga fresca. La imagen puede estar corrupta o alterada.${NC}"
-                echo -e "${RED}   Esperado: $EXPECTED${NC}"
-                echo -e "${RED}   Obtenido: $ACTUAL${NC}"
-                rm -f "$FILE_PATH"
-                exit 1
-            fi
-
-            # Cache obsoleto: el upstream publico una nueva build -> re-descargar
-            echo -e "${YELLOW}⚠️  Checksum no coincide (caché obsoleto, el upstream publicó una nueva build).${NC}"
-            echo -e "${YELLOW}   Esperado: $EXPECTED${NC}"
-            echo -e "${YELLOW}   En caché: $ACTUAL${NC}"
-            echo -e "${YELLOW}   Re-descargando imagen...${NC}"
-            # NO borrar la caché vieja todavía: si la re-descarga falla (mirror
-            # caído/intermitente), conservamos la imagen anterior en vez de
-            # quedarnos sin nada y re-descargar completo en la próxima corrida.
-            if ! wget -q --show-progress --tries=5 --waitretry=10 --timeout=30 -O "${FILE_PATH}.part" "$IMAGE_URL"; then
-                rm -f "${FILE_PATH}.part"
-                echo -e "${RED}❌ Falló la re-descarga. Se conserva la imagen anterior en caché (build vieja).${NC}"
-                exit 1
-            fi
-            mv -f "${FILE_PATH}.part" "$FILE_PATH"
-            FRESHLY_DOWNLOADED=true
-            ATTEMPT=$((ATTEMPT+1))
-        done
+        fi
+        rm -f "$SUMS_FILE"
     fi
+
+    if [ -z "$EXPECTED" ]; then
+        # Sin sumas no se puede ni identificar ni validar la build: se reutiliza
+        # lo que haya en caché antes que bajar a ciegas algo no verificable.
+        echo -e "${YELLOW}⚠️  No se pudo obtener el archivo de sumas: sin verificación de integridad.${NC}"
+        FILE_PATH=$(cache_builds "$CACHE_DIR" "$IMG_BASE" "$IMG_EXT" | head -1)
+        [ -z "$FILE_PATH" ] && [ -f "$LEGACY_PATH" ] && FILE_PATH="$LEGACY_PATH"
+        if [ -n "$FILE_PATH" ]; then
+            echo -e "${GREEN}✅ Usando la imagen en caché: $(basename "$FILE_PATH")${NC}"
+        else
+            FILE_PATH="$LEGACY_PATH"
+            download_image "$IMAGE_URL" "$FILE_PATH" || {
+                echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; exit 1; }
+        fi
+    else
+        FILE_PATH="${CACHE_DIR}/${IMG_BASE}-${EXPECTED:0:12}.${IMG_EXT}"
+
+        # Migración del esquema anterior (archivo único sin sufijo): se reetiqueta
+        # con su propio hash. Si resulta ser la build que sirve el upstream ahora,
+        # el destino es justo FILE_PATH y no se descarga nada.
+        if [ -f "$LEGACY_PATH" ]; then
+            echo -e "${BLUE}🔐 Reetiquetando la imagen heredada del esquema anterior...${NC}"
+            local LEGACY_SUM
+            LEGACY_SUM=$($CHECKSUM_ALGO "$LEGACY_PATH" | awk '{print $1}')
+            mv -f "$LEGACY_PATH" "${CACHE_DIR}/${IMG_BASE}-${LEGACY_SUM:0:12}.${IMG_EXT}"
+        fi
+
+        if [ -f "$FILE_PATH" ]; then
+            # El nombre lleva el hash de la build, así que recalcularlo valida de
+            # paso que el archivo no se corrompió en disco.
+            echo -e "${BLUE}🔐 Verificando la imagen en caché (${CHECKSUM_ALGO})...${NC}"
+            if [ "$($CHECKSUM_ALGO "$FILE_PATH" | awk '{print $1}')" = "$EXPECTED" ]; then
+                echo -e "${GREEN}✅ La build actual ya está en caché — no hace falta descargar.${NC}"
+            else
+                echo -e "${YELLOW}⚠️  La copia en caché está corrupta; se descarga de nuevo.${NC}"
+                rm -f "$FILE_PATH"
+            fi
+        fi
+
+        if [ ! -f "$FILE_PATH" ]; then
+            # Que haya una build anterior es lo NORMAL (el upstream republica cada
+            # 1-2 semanas), no un error: se deja elegir en vez de imponer la
+            # descarga. La imagen vieja sirve igual porque cloud-init hace
+            # package_upgrade en el primer arranque.
+            local OLD_BUILD USE_CACHE="no"
+            OLD_BUILD=$(cache_builds "$CACHE_DIR" "$IMG_BASE" "$IMG_EXT" | head -1)
+            if [ -n "$OLD_BUILD" ]; then
+                local AGE_DAYS
+                AGE_DAYS=$(( ( $(date +%s) - $(stat -c %Y "$OLD_BUILD") ) / 86400 ))
+                echo -e "\n${YELLOW}⚠️  El upstream publicó una build más reciente que la que tienes.${NC}"
+                echo -e "   ${CYAN}En caché:${NC} $(basename "$OLD_BUILD")  (${AGE_DAYS} día/s)"
+                echo -e "   ${CYAN}Nueva   :${NC} ${EXPECTED:0:12}…  (~$(remote_size_mb "$IMAGE_URL") MB de descarga)"
+                case "${IMAGE_REFRESH:-ask}" in
+                    never)  USE_CACHE="si" ;;
+                    always) USE_CACHE="no" ;;
+                    *)
+                        local R=""
+                        read -r -p "   ¿Usar la imagen en caché y no descargar? [S/n]: " R || R=""
+                        [[ "${R,,}" =~ ^(n|no)$ ]] || USE_CACHE="si"
+                        ;;
+                esac
+            fi
+
+            if [ "$USE_CACHE" = "si" ]; then
+                FILE_PATH="$OLD_BUILD"
+                echo -e "${GREEN}✅ Usando la build en caché (cloud-init actualizará los paquetes al arrancar).${NC}"
+            elif ! download_image "$IMAGE_URL" "$FILE_PATH"; then
+                # Mirror caído: mejor desplegar con la build anterior que abortar.
+                if [ -n "$OLD_BUILD" ]; then
+                    echo -e "${YELLOW}⚠️  Falló la descarga; se continúa con la build anterior en caché.${NC}"
+                    FILE_PATH="$OLD_BUILD"
+                else
+                    echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; exit 1
+                fi
+            else
+                local ACTUAL
+                ACTUAL=$($CHECKSUM_ALGO "$FILE_PATH" | awk '{print $1}')
+                if [ "$EXPECTED" != "$ACTUAL" ]; then
+                    # Descarga fresca que no cuadra -> corrupta o alterada
+                    echo -e "${RED}❌ Checksum MISMATCH tras descarga fresca. La imagen puede estar corrupta o alterada.${NC}"
+                    echo -e "${RED}   Esperado: $EXPECTED${NC}"
+                    echo -e "${RED}   Obtenido: $ACTUAL${NC}"
+                    rm -f "$FILE_PATH"
+                    exit 1
+                fi
+                echo -e "${GREEN}✅ Checksum OK (${CHECKSUM_ALGO}).${NC}"
+            fi
+        fi
+    fi
+
+    IMAGE_NAME=$(basename "$FILE_PATH")
+    prune_old_builds "$CACHE_DIR" "$IMG_BASE" "$IMG_EXT" "$FILE_PATH"
 
     # Tamaño virtual de la imagen = disco mínimo de la VM: qm resize no puede
     # ENCOGER un disco, así que pedir menos que esto haría fallar el deploy
@@ -1063,7 +1157,7 @@ deploy_vm() {
 - **Acceso:** ${AUTH_DESC}
 
 ---
-📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.1
+📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.2
 📝 Log: ${LOG_FILE}"
 
     {

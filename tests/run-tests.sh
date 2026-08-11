@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Banco de pruebas de deploy-vm.sh V8.1 — corre en un host Debian SIN Proxmox.
+# Banco de pruebas de deploy-vm.sh V8.2 — corre en un host Debian SIN Proxmox.
 # Los comandos PVE (qm/pvesh/pvesm) y qemu-img/ip se stubean: nada real se
 # crea; los stubs registran sus argumentos para las aserciones. wget/mkpasswd/
 # ssh-keygen/findmnt/lsblk/python3 son REALES (descargas y checksums genuinos).
@@ -155,6 +155,10 @@ check "network-config: ruta ::/0 vía gw6"            "via: 2001:db8::1"        
 check "network-config: accept-ra false"              "accept-ra: false"                            "$N"
 [ "$(stat -c %a "$U")" = "600" ] && ok "user-data con permisos 600" || bad "user-data permisos $(stat -c %a "$U")"
 cp "$U" "$D/runA-user.yaml"; cp "$N" "$D/runA-net.yaml"
+ISO=/var/lib/vz/template/iso
+ls "$ISO"/debian-13-genericcloud-amd64-*.qcow2 >/dev/null 2>&1 \
+  && ok "Imagen cacheada con el hash de la build en el nombre" \
+  || bad "La imagen cacheada NO lleva sufijo de build"
 
 # ==============================================================================
 echo "════════ RUN B: Ubuntu 24.04 · auth 2 (solo clave) · /32 on-link ════════"
@@ -202,6 +206,11 @@ cp "$U" "$D/runB-user.yaml"; cp "$N" "$D/runB-net.yaml"
 # ==============================================================================
 echo "════════ RUN C: rollback E2E — qm resize FALLA dentro de deploy_vm() ════════"
 reset_state
+# Simula el esquema anterior de caché (archivo único, sin sufijo de build) para
+# comprobar que se reetiqueta con su hash en vez de re-descargarse: es lo que
+# viven los nodos que ya venían usando versiones <= 8.1.
+CACHED=$(ls -1t "$ISO"/debian-13-genericcloud-amd64-*.qcow2 2>/dev/null | head -1)
+[ -n "$CACHED" ] && mv "$CACHED" "$ISO/debian-13-genericcloud-amd64.qcow2"
 export QM_FAIL_RESIZE=1
 printf '%s\n' \
   "2" \
@@ -228,7 +237,12 @@ unset QM_FAIL_RESIZE
 # El mensaje del rollback puede salir por stdout o quedar en el log del deploy
 # (el trap dispara dentro del bloque redirigido) — buscar en ambos
 cat "$D/runC.out" /var/log/proxmox-deploy/deploy_VM999_*.log > "$D/runC.all" 2>/dev/null
-check "Imagen tomada de caché (2ª vez)"              "encontrada en caché local"                   "$D/runC.out"
+check "Migra el esquema viejo de caché sin re-bajar"  "Reetiquetando la imagen heredada"            "$D/runC.out"
+check "Build ya en caché: no hace falta descargar"    "ya está en caché"                            "$D/runC.out"
+checknot "2ª corrida SIN descarga de imagen"          "📥 Descargando"                              "$D/runC.out"
+ls "$ISO"/debian-13-genericcloud-amd64-*.qcow2 >/dev/null 2>&1 \
+  && ok "Caché reetiquetada al esquema por build" \
+  || bad "La caché quedó sin sufijo de build"
 check "Rollback SE EJECUTÓ (fix set -E: antes moría en silencio)" "Limpiando recursos parciales"   "$D/runC.all"
 check "Rollback destruyó la VM parcial"              "qm destroy 999"                              "$D/qm.log"
 [ ! -f "$D/vm-999.exists" ] && ok "VM parcial eliminada" || bad "VM parcial sigue existiendo"
