@@ -541,8 +541,49 @@ ask_snippet_storage() {
         echo -e "${RED}❌ No hay storages tipo dir activos para snippets.${NC}"; exit 1
     fi
 
-    STORAGE_SNIP="${STORAGES_SNIP[0]}"
-    echo -e "${GREEN}✅ Snippets en: ${CYAN}$STORAGE_SNIP${NC} (único compatible)"
+    # Orden de preferencia (NO tomar a ciegas el primero de la lista: en nodos
+    # con un share de backups montado, el orden alfabético dejaba los snippets
+    # en el NAS y la VM no arrancaba si el NAS no estaba montado al boot):
+    #   1) storages que YA tienen "snippets" en su content (no tocamos config)
+    #   2) tipo dir (local) antes que nfs/cifs/cephfs (remoto)
+    # Si hay empate en el primer puesto, se pregunta igual que con el disco.
+    local S_CONTENT S_TYPE RANK BEST_RANK
+    local -a RANKED=()
+    for S in "${STORAGES_SNIP[@]}"; do
+        S_CONTENT=$(pvesh get "/storage/${S}" --output-format json 2>/dev/null \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin).get("content",""))' 2>/dev/null || true)
+        S_TYPE=$(pvesm status 2>/dev/null | awk -v s="$S" '$1==s {print $2}')
+        RANK=3
+        [ "$S_TYPE" = "dir" ] && RANK=2
+        [[ ",${S_CONTENT}," == *",snippets,"* ]] && RANK=$(( RANK - 2 ))
+        RANKED+=("${RANK} ${S}")
+    done
+
+    BEST_RANK=$(printf '%s\n' "${RANKED[@]}" | sort -s -n -k1,1 | head -1 | awk '{print $1}')
+    local -a TIED=()
+    for R in "${RANKED[@]}"; do
+        [ "${R%% *}" = "$BEST_RANK" ] && TIED+=("${R#* }")
+    done
+
+    if [ ${#TIED[@]} -eq 1 ]; then
+        STORAGE_SNIP="${TIED[0]}"
+        echo -e "${GREEN}✅ Snippets en: ${CYAN}$STORAGE_SNIP${NC}"
+    else
+        for i in "${!TIED[@]}"; do
+            S="${TIED[$i]}"
+            S_TYPE=$(pvesm status 2>/dev/null | awk -v s="$S" '$1==s {print $2}')
+            echo "  $((i+1))) ${S} (${S_TYPE})"
+        done
+        while true; do
+            read -p "Selecciona storage para snippets/cloud-init [1]: " SNIP_IDX; SNIP_IDX=${SNIP_IDX:-1}
+            if [[ "$SNIP_IDX" =~ ^[0-9]+$ ]] && (( SNIP_IDX >= 1 && SNIP_IDX <= ${#TIED[@]} )); then
+                STORAGE_SNIP="${TIED[$((SNIP_IDX-1))]}"
+                break
+            fi
+            echo -e "${RED}❌ Índice inválido. Selecciona un número del 1 al ${#TIED[@]}.${NC}"
+        done
+        echo -e "${GREEN}✅ Snippets en: ${CYAN}$STORAGE_SNIP${NC}"
+    fi
 
     # Habilitar snippets PRESERVANDO el content real del storage. El content
     # se lee de la API (/storage/<id>), no de `pvesm status` (cuya columna 2
@@ -1171,7 +1212,7 @@ deploy_vm() {
           --nameserver "$DNS_SERVERS" \
           --scsihw virtio-scsi-single \
           --scsi0 "${STORAGE_IMG}:0,import-from=${FILE_PATH},discard=on,iothread=1${STORAGE_SSD_FLAG}" \
-          --ide2 "${STORAGE_SNIP}:cloudinit" \
+          --ide2 "${STORAGE_IMG}:cloudinit" \
           --boot "order=scsi0" \
           --cpu "${CPU_TYPE}" \
           --ostype l26 \
