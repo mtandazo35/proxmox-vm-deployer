@@ -75,7 +75,7 @@ pick_fastest_mirror() {
     if [ $# -eq 1 ]; then echo "$1"; return 0; fi
 
     tmpdir=$(mktemp -d) || { echo "$1"; return 0; }
-    echo -e "\n${BLUE}🌎 Midiendo mirrors para elegir el más rápido...${NC}" >&2
+    echo -e "\n${BLUE}🌎  Midiendo mirrors para elegir el más rápido...${NC}" >&2
 
     for base in "$@"; do
         (
@@ -105,7 +105,7 @@ pick_fastest_mirror() {
         echo -e "  ${YELLOW}⚠️  Ningún mirror respondió a la sonda; se usará el primero de la lista.${NC}" >&2
         return 1
     fi
-    echo -e "  ${GREEN}✅ Mirror elegido: $(echo "$winner" | cut -d/ -f3)${NC}" >&2
+    echo -e "  ${GREEN}✅  Mirror elegido: $(echo "$winner" | cut -d/ -f3)${NC}" >&2
     echo "$winner"
 }
 
@@ -121,7 +121,7 @@ pick_fastest_mirror() {
 # en caché como si fuera una imagen completa.
 download_image() {
     local url="$1" dest="$2"
-    echo -e "${YELLOW}📥 Descargando $(basename "$url")...${NC}"
+    echo -e "${YELLOW}📥  Descargando $(basename "$url")...${NC}"
     if ! wget -q --show-progress --tries=5 --waitretry=10 --timeout=30 -O "${dest}.part" "$url"; then
         rm -f "${dest}.part"
         return 1
@@ -155,13 +155,13 @@ prune_old_builds() {
         total=$(( total + $(stat -c %s "$f" 2>/dev/null || echo 0) ))
     done < <(cache_builds "$dir" "$base" "$ext")
     if [ ${#old[@]} -eq 0 ]; then return 0; fi
-    echo -e "\n${CYAN}🧹 Builds antiguas en caché: ${#old[@]} ($(( total / 1048576 )) MB)${NC}"
+    echo -e "\n${CYAN}🧹  Builds antiguas en caché: ${#old[@]} ($(( total / 1048576 )) MB)${NC}"
     printf "   %s\n" "${old[@]##*/}"
     if [ ! -t 0 ]; then return 0; fi
     read -r -p "   ¿Borrarlas? [s/N]: " R || R=""
     if [[ "${R,,}" =~ ^(s|si|sí|y|yes)$ ]]; then
         rm -f "${old[@]}"
-        echo -e "   ${GREEN}✅ Liberados $(( total / 1048576 )) MB.${NC}"
+        echo -e "   ${GREEN}✅  Liberados $(( total / 1048576 )) MB.${NC}"
     fi
     return 0
 }
@@ -245,10 +245,10 @@ rollback() {
         exit 1
     fi
 
-    echo -e "\n${RED}❌ CANCELACIÓN/ERROR - Limpiando recursos parciales de la VM ${VMID}...${NC}"
+    echo -e "\n${RED}❌  CANCELACIÓN/ERROR - Limpiando recursos parciales de la VM ${VMID}...${NC}"
 
     if [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ]; then
-        echo -e "${YELLOW}📝 Revisa el archivo de log para ver el error exacto: ${LOG_FILE}${NC}"
+        echo -e "${YELLOW}📝  Revisa el archivo de log para ver el error exacto: ${LOG_FILE}${NC}"
     fi
 
     qm status "$VMID" &>/dev/null && {
@@ -271,9 +271,9 @@ trap rollback INT TERM ERR EXIT
 select_os_and_download() {
     clear 2>/dev/null || true   # sin TTY (ssh no interactivo) clear falla y set -e mataría el script
     echo -e "${GREEN}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║    Cloud-Init Proxmox - Despliegue Automatizado      ║${NC}"
+    echo -e "${GREEN}║    Cloud-Init Proxmox - Despliegue Automatizado    ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
-    echo -e "\n${BLUE}🐧 Selecciona el Sistema Operativo Base:${NC}"
+    echo -e "\n${BLUE}🐧  Selecciona el Sistema Operativo Base:${NC}"
     echo "  1) Debian 12 (Bookworm)"
     echo "  2) Debian 13 (Trixie)"
     echo "  3) Ubuntu 20.04 LTS (Focal Fossa)"
@@ -319,7 +319,7 @@ select_os_and_download() {
             OS_TYPE="ubuntu"
             ;;
         *)
-            echo -e "${RED}❌ Opción inválida.${NC}"; exit 1
+            echo -e "${RED}❌  Opción inválida.${NC}"; exit 1
             ;;
     esac
 
@@ -359,9 +359,9 @@ select_os_and_download() {
     local LEGACY_PATH="${CACHE_DIR}/${IMAGE_NAME}"
     mkdir -p "$CACHE_DIR"
 
-    echo -e "\n${BLUE}🔍 Verificando conectividad y caché de imagen...${NC}"
+    echo -e "\n${BLUE}🔍  Verificando conectividad y caché de imagen...${NC}"
     if ! wget -q --spider --timeout=5 "https://8.8.8.8" &>/dev/null && ! ping -c 1 8.8.8.8 &>/dev/null; then
-         echo -e "${RED}❌ Sin conexión a Internet en el nodo Proxmox.${NC}"; exit 1
+         echo -e "${RED}❌  Sin conexión a Internet en el nodo Proxmox.${NC}"; exit 1
     fi
 
     # --- Qué build sirve el upstream AHORA, identificada por su checksum ---
@@ -385,11 +385,11 @@ select_os_and_download() {
         FILE_PATH=$(cache_builds "$CACHE_DIR" "$IMG_BASE" "$IMG_EXT" | head -1)
         [ -z "$FILE_PATH" ] && [ -f "$LEGACY_PATH" ] && FILE_PATH="$LEGACY_PATH"
         if [ -n "$FILE_PATH" ]; then
-            echo -e "${GREEN}✅ Usando la imagen en caché: $(basename "$FILE_PATH")${NC}"
+            echo -e "${GREEN}✅  Usando la imagen en caché: $(basename "$FILE_PATH")${NC}"
         else
             FILE_PATH="$LEGACY_PATH"
             download_image "$IMAGE_URL" "$FILE_PATH" || {
-                echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; exit 1; }
+                echo -e "${RED}❌  Falló la descarga. Verifica la red o la URL.${NC}"; exit 1; }
         fi
     else
         FILE_PATH="${CACHE_DIR}/${IMG_BASE}-${EXPECTED:0:12}.${IMG_EXT}"
@@ -398,7 +398,7 @@ select_os_and_download() {
         # con su propio hash. Si resulta ser la build que sirve el upstream ahora,
         # el destino es justo FILE_PATH y no se descarga nada.
         if [ -f "$LEGACY_PATH" ]; then
-            echo -e "${BLUE}🔐 Reetiquetando la imagen heredada del esquema anterior...${NC}"
+            echo -e "${BLUE}🔐  Reetiquetando la imagen heredada del esquema anterior...${NC}"
             local LEGACY_SUM
             LEGACY_SUM=$($CHECKSUM_ALGO "$LEGACY_PATH" | awk '{print $1}')
             mv -f "$LEGACY_PATH" "${CACHE_DIR}/${IMG_BASE}-${LEGACY_SUM:0:12}.${IMG_EXT}"
@@ -407,9 +407,9 @@ select_os_and_download() {
         if [ -f "$FILE_PATH" ]; then
             # El nombre lleva el hash de la build, así que recalcularlo valida de
             # paso que el archivo no se corrompió en disco.
-            echo -e "${BLUE}🔐 Verificando la imagen en caché (${CHECKSUM_ALGO})...${NC}"
+            echo -e "${BLUE}🔐  Verificando la imagen en caché (${CHECKSUM_ALGO})...${NC}"
             if [ "$($CHECKSUM_ALGO "$FILE_PATH" | awk '{print $1}')" = "$EXPECTED" ]; then
-                echo -e "${GREEN}✅ La build actual ya está en caché — no hace falta descargar.${NC}"
+                echo -e "${GREEN}✅  La build actual ya está en caché — no hace falta descargar.${NC}"
             else
                 echo -e "${YELLOW}⚠️  La copia en caché está corrupta; se descarga de nuevo.${NC}"
                 rm -f "$FILE_PATH"
@@ -442,27 +442,27 @@ select_os_and_download() {
 
             if [ "$USE_CACHE" = "si" ]; then
                 FILE_PATH="$OLD_BUILD"
-                echo -e "${GREEN}✅ Usando la build en caché (cloud-init actualizará los paquetes al arrancar).${NC}"
+                echo -e "${GREEN}✅  Usando la build en caché (cloud-init actualizará los paquetes al arrancar).${NC}"
             elif ! download_image "$IMAGE_URL" "$FILE_PATH"; then
                 # Mirror caído: mejor desplegar con la build anterior que abortar.
                 if [ -n "$OLD_BUILD" ]; then
                     echo -e "${YELLOW}⚠️  Falló la descarga; se continúa con la build anterior en caché.${NC}"
                     FILE_PATH="$OLD_BUILD"
                 else
-                    echo -e "${RED}❌ Falló la descarga. Verifica la red o la URL.${NC}"; exit 1
+                    echo -e "${RED}❌  Falló la descarga. Verifica la red o la URL.${NC}"; exit 1
                 fi
             else
                 local ACTUAL
                 ACTUAL=$($CHECKSUM_ALGO "$FILE_PATH" | awk '{print $1}')
                 if [ "$EXPECTED" != "$ACTUAL" ]; then
                     # Descarga fresca que no cuadra -> corrupta o alterada
-                    echo -e "${RED}❌ Checksum MISMATCH tras descarga fresca. La imagen puede estar corrupta o alterada.${NC}"
+                    echo -e "${RED}❌  Checksum MISMATCH tras descarga fresca. La imagen puede estar corrupta o alterada.${NC}"
                     echo -e "${RED}   Esperado: $EXPECTED${NC}"
                     echo -e "${RED}   Obtenido: $ACTUAL${NC}"
                     rm -f "$FILE_PATH"
                     exit 1
                 fi
-                echo -e "${GREEN}✅ Checksum OK (${CHECKSUM_ALGO}).${NC}"
+                echo -e "${GREEN}✅  Checksum OK (${CHECKSUM_ALGO}).${NC}"
             fi
         fi
     fi
@@ -488,11 +488,11 @@ select_os_and_download() {
 # FASE 2: AUTO-SELECCIÓN DE STORAGE PARA IMÁGENES
 # ==============================================================================
 auto_select_image_storage() {
-    echo -e "\n${BLUE}💾 Storages disponibles para el Disco Virtual:${NC}"
+    echo -e "\n${BLUE}💾  Storages disponibles para el Disco Virtual:${NC}"
     mapfile -t STORAGES_IMG < <(pvesm status --content images 2>/dev/null | awk '$3=="active" {print $1}')
     
     if [ ${#STORAGES_IMG[@]} -eq 0 ]; then
-        echo -e "${RED}❌ No hay storages de imágenes activos.${NC}"; exit 1
+        echo -e "${RED}❌  No hay storages de imágenes activos.${NC}"; exit 1
     fi
 
     for i in "${!STORAGES_IMG[@]}"; do
@@ -505,7 +505,7 @@ auto_select_image_storage() {
 
     if [ ${#STORAGES_IMG[@]} -eq 1 ]; then
         STORAGE_IMG="${STORAGES_IMG[0]}"
-        echo -e "  ${GREEN}✅ Storage único seleccionado: ${CYAN}$STORAGE_IMG${NC}"
+        echo -e "  ${GREEN}✅  Storage único seleccionado: ${CYAN}$STORAGE_IMG${NC}"
     else
         while true; do
             read -p "Selecciona storage para disco VM [1]: " IMG_IDX; IMG_IDX=${IMG_IDX:-1}
@@ -513,9 +513,9 @@ auto_select_image_storage() {
                 STORAGE_IMG="${STORAGES_IMG[$((IMG_IDX-1))]}"
                 break
             fi
-            echo -e "${RED}❌ Índice inválido. Selecciona un número del 1 al ${#STORAGES_IMG[@]}.${NC}"
+            echo -e "${RED}❌  Índice inválido. Selecciona un número del 1 al ${#STORAGES_IMG[@]}.${NC}"
         done
-        echo -e "${GREEN}✅ Storage seleccionado: ${CYAN}$STORAGE_IMG${NC}"
+        echo -e "${GREEN}✅  Storage seleccionado: ${CYAN}$STORAGE_IMG${NC}"
     fi
 
     local ROTA
@@ -534,11 +534,11 @@ auto_select_image_storage() {
 # FASE 3: AUTO-SELECCIÓN DE STORAGE PARA SNIPPETS
 # ==============================================================================
 ask_snippet_storage() {
-    echo -e "\n${BLUE}📄 Detectando storage para Snippets/Cloud-Init...${NC}"
+    echo -e "\n${BLUE}📄  Detectando storage para Snippets/Cloud-Init...${NC}"
     mapfile -t STORAGES_SNIP < <(pvesm status 2>/dev/null | awk '$3=="active" && $2 ~ /^(dir|nfs|cifs|cephfs)$/ {print $1}')
 
     if [ ${#STORAGES_SNIP[@]} -eq 0 ]; then
-        echo -e "${RED}❌ No hay storages tipo dir activos para snippets.${NC}"; exit 1
+        echo -e "${RED}❌  No hay storages tipo dir activos para snippets.${NC}"; exit 1
     fi
 
     # Orden de preferencia (NO tomar a ciegas el primero de la lista: en nodos
@@ -567,7 +567,7 @@ ask_snippet_storage() {
 
     if [ ${#TIED[@]} -eq 1 ]; then
         STORAGE_SNIP="${TIED[0]}"
-        echo -e "${GREEN}✅ Snippets en: ${CYAN}$STORAGE_SNIP${NC}"
+        echo -e "${GREEN}✅  Snippets en: ${CYAN}$STORAGE_SNIP${NC}"
     else
         for i in "${!TIED[@]}"; do
             S="${TIED[$i]}"
@@ -580,9 +580,9 @@ ask_snippet_storage() {
                 STORAGE_SNIP="${TIED[$((SNIP_IDX-1))]}"
                 break
             fi
-            echo -e "${RED}❌ Índice inválido. Selecciona un número del 1 al ${#TIED[@]}.${NC}"
+            echo -e "${RED}❌  Índice inválido. Selecciona un número del 1 al ${#TIED[@]}.${NC}"
         done
-        echo -e "${GREEN}✅ Snippets en: ${CYAN}$STORAGE_SNIP${NC}"
+        echo -e "${GREEN}✅  Snippets en: ${CYAN}$STORAGE_SNIP${NC}"
     fi
 
     # Habilitar snippets PRESERVANDO el content real del storage. El content
@@ -595,7 +595,7 @@ ask_snippet_storage() {
 
     if [ -n "$CURRENT_CONTENT" ]; then
         if [[ ",${CURRENT_CONTENT}," != *",snippets,"* ]]; then
-            echo -e "${CYAN}🔧 Habilitando snippets en $STORAGE_SNIP (preservando: ${CURRENT_CONTENT})...${NC}"
+            echo -e "${CYAN}🔧  Habilitando snippets en $STORAGE_SNIP (preservando: ${CURRENT_CONTENT})...${NC}"
             pvesm set "$STORAGE_SNIP" --content "${CURRENT_CONTENT},snippets" || true
         fi
     else
@@ -615,16 +615,16 @@ ask_snippet_storage() {
 # FASE 4: DIMENSIONAMIENTO E IDENTIDAD
 # ==============================================================================
 ask_vmid_and_name() {
-    echo -e "\n${BLUE}🆔 Identificación de la Máquina Virtual${NC}"
+    echo -e "\n${BLUE}🆔  Identificación de la Máquina Virtual${NC}"
     while true; do
         PROXIMO_ID=$(pvesh get /cluster/nextid 2>/dev/null || echo "100")
         read -p "ID VM [$PROXIMO_ID]: " INPUT_VMID
         VMID=${INPUT_VMID:-$PROXIMO_ID}
         
         if ! [[ "$VMID" =~ ^[0-9]+$ ]] || [ "$VMID" -lt 100 ]; then
-            echo -e "${RED}❌ El ID debe ser un número ≥ 100.${NC}"
+            echo -e "${RED}❌  El ID debe ser un número ≥ 100.${NC}"
         elif vmid_exists "$VMID"; then
-            echo -e "${RED}❌ El ID $VMID ya existe en el cluster (VM o CT, puede estar en otro nodo). Elige otro.${NC}"
+            echo -e "${RED}❌  El ID $VMID ya existe en el cluster (VM o CT, puede estar en otro nodo). Elige otro.${NC}"
         else
             break
         fi
@@ -638,9 +638,9 @@ ask_vmid_and_name() {
     while true; do
         read -p "Nombre VM (ej. webserver-01): " NOMBRE
         if [[ -z "$NOMBRE" ]]; then
-            echo -e "${RED}❌ El nombre es obligatorio.${NC}"
+            echo -e "${RED}❌  El nombre es obligatorio.${NC}"
         elif ! [[ "$NOMBRE" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
-            echo -e "${RED}❌ Nombre inválido. Usa solo letras, dígitos y '-' (1-63 chars, sin empezar/terminar con '-').${NC}"
+            echo -e "${RED}❌  Nombre inválido. Usa solo letras, dígitos y '-' (1-63 chars, sin empezar/terminar con '-').${NC}"
         else
             break
         fi
@@ -652,27 +652,27 @@ ask_resources() {
     
     while true; do
         read -p "RAM MB [2048]: " RAM; RAM=${RAM:-2048}
-        [[ "$RAM" =~ ^[0-9]+$ ]] && (( RAM >= 512 )) && break || echo -e "${RED}❌ RAM inválida (mínimo 512)${NC}"
+        [[ "$RAM" =~ ^[0-9]+$ ]] && (( RAM >= 512 )) && break || echo -e "${RED}❌  RAM inválida (mínimo 512)${NC}"
     done
     
     while true; do
         read -p "CPU cores [2]: " CPU; CPU=${CPU:-2}
-        [[ "$CPU" =~ ^[0-9]+$ ]] && (( CPU >= 1 )) && break || echo -e "${RED}❌ CPU inválida (mínimo 1)${NC}"
+        [[ "$CPU" =~ ^[0-9]+$ ]] && (( CPU >= 1 )) && break || echo -e "${RED}❌  CPU inválida (mínimo 1)${NC}"
     done
     
     while true; do
         read -p "Disco GB [20]: " DISK; DISK=${DISK:-20}
         # Mínimo = tamaño virtual de la imagen (qm resize no puede encoger)
-        [[ "$DISK" =~ ^[0-9]+$ ]] && (( DISK >= IMG_MIN_GB )) || { echo -e "${RED}❌ Disco mínimo ${IMG_MIN_GB}GB (la imagen ${IMAGE_NAME} no se puede encoger)${NC}"; continue; }
+        [[ "$DISK" =~ ^[0-9]+$ ]] && (( DISK >= IMG_MIN_GB )) || { echo -e "${RED}❌  Disco mínimo ${IMG_MIN_GB}GB (la imagen ${IMAGE_NAME} no se puede encoger)${NC}"; continue; }
 
         local AVAIL_KB=$(pvesm status | awk -v s="$STORAGE_IMG" '$1==s {print $6}')
         if [[ -z "$AVAIL_KB" ]]; then break; fi
         local AVAIL_GB=$(( AVAIL_KB / 1048576 ))
 
         if (( DISK > AVAIL_GB )); then
-            echo -e "${RED}❌ Espacio insuficiente. Pediste ${DISK}GB pero solo hay ${AVAIL_GB}GB libres en $STORAGE_IMG.${NC}"
+            echo -e "${RED}❌  Espacio insuficiente. Pediste ${DISK}GB pero solo hay ${AVAIL_GB}GB libres en $STORAGE_IMG.${NC}"
         else
-            echo -e "${GREEN}✅ Recursos verificados correctamente.${NC}"
+            echo -e "${GREEN}✅  Recursos verificados correctamente.${NC}"
             break
         fi
     done
@@ -682,7 +682,7 @@ ask_resources() {
 # FASE 5: AUTENTICACIÓN
 # ==============================================================================
 ask_auth_mode() {
-    echo -e "\n${BLUE}🔐 Autenticación:${NC}"
+    echo -e "\n${BLUE}🔐  Autenticación:${NC}"
     echo "1) Solo root + contraseña"
     echo "2) Solo clave SSH"
     echo "3) SSH + contraseña root (recomendado)"
@@ -691,7 +691,7 @@ ask_auth_mode() {
     while true; do
         read -p "Opción [3]: " AUTH_MODE; AUTH_MODE=${AUTH_MODE:-3}
         [[ "$AUTH_MODE" =~ ^[123]$ ]] && break
-        echo -e "${RED}❌ Opción inválida. Debe ser 1, 2 o 3.${NC}"
+        echo -e "${RED}❌  Opción inválida. Debe ser 1, 2 o 3.${NC}"
     done
 
     if [[ "$AUTH_MODE" == "1" ]] || [[ "$AUTH_MODE" == "3" ]]; then
@@ -699,13 +699,13 @@ ask_auth_mode() {
             read -s -p "Password root: " PASS1; echo
             read -s -p "Confirma: " PASS2; echo
             [[ "$PASS1" == "$PASS2" && -n "$PASS1" ]] && break
-            echo -e "${RED}❌ Las contraseñas no coinciden${NC}"
+            echo -e "${RED}❌  Las contraseñas no coinciden${NC}"
         done
 
         if ! command -v mkpasswd >/dev/null 2>&1; then
-            echo -e "${YELLOW}🔧 mkpasswd no encontrado, instalando paquete 'whois'...${NC}"
+            echo -e "${YELLOW}🔧  mkpasswd no encontrado, instalando paquete 'whois'...${NC}"
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq whois >/dev/null 2>&1 || {
-                echo -e "${RED}❌ No se pudo instalar 'whois' (requerido para hashear el password).${NC}"
+                echo -e "${RED}❌  No se pudo instalar 'whois' (requerido para hashear el password).${NC}"
                 echo -e "${RED}   Ejecuta: apt-get install whois   y reintenta.${NC}"
                 unset PASS1 PASS2
                 exit 1
@@ -715,9 +715,9 @@ ask_auth_mode() {
         ROOT_PASS_HASH=$(mkpasswd --method=sha-512 --stdin <<< "$PASS1")
         unset PASS1 PASS2
         if [[ "$ROOT_PASS_HASH" != \$6\$* ]]; then
-            echo -e "${RED}❌ mkpasswd falló generando hash SHA-512.${NC}"; exit 1
+            echo -e "${RED}❌  mkpasswd falló generando hash SHA-512.${NC}"; exit 1
         fi
-        echo -e "${GREEN}✅ Contraseña encriptada exitosamente (SHA-512).${NC}"
+        echo -e "${GREEN}✅  Contraseña encriptada exitosamente (SHA-512).${NC}"
         SSH_PWAUTH="true"
         SSHD_PASSWORD_AUTH="yes"
     fi
@@ -729,13 +729,13 @@ ask_auth_mode() {
             # Validar formato: una clave truncada/typo en modo 2 = VM inaccesible
             if ssh-keygen -lf /dev/stdin <<< "$line" >/dev/null 2>&1; then
                 SSH_KEYS+=("$line")
-                echo -e "  ${GREEN}✅ Clave válida agregada (${#SSH_KEYS[@]}).${NC}"
+                echo -e "  ${GREEN}✅  Clave válida agregada (${#SSH_KEYS[@]}).${NC}"
             else
-                echo -e "  ${RED}❌ No parece una clave pública SSH válida — ignorada. Pega otra o Enter para terminar.${NC}"
+                echo -e "  ${RED}❌  No parece una clave pública SSH válida — ignorada. Pega otra o Enter para terminar.${NC}"
             fi
         done
         if [[ "$AUTH_MODE" == "2" && ${#SSH_KEYS[@]} -eq 0 ]]; then
-            echo -e "${RED}❌ Modo 'solo clave SSH' requiere al menos una clave. Abortando.${NC}"
+            echo -e "${RED}❌  Modo 'solo clave SSH' requiere al menos una clave. Abortando.${NC}"
             exit 1
         fi
     fi
@@ -752,16 +752,16 @@ ask_auth_mode() {
 # FASE 6: RED
 # ==============================================================================
 ask_network() {
-    echo -e "\n${BLUE}🌐 Configuración de Red${NC}"
+    echo -e "\n${BLUE}🌐  Configuración de Red${NC}"
 
     # Solo bridges de Proxmox (vmbrN): excluye docker0, fwbr*, y los
     # sub-bridges vmbrXvY que crea el tagging VLAN en bridges legacy.
     mapfile -t BRIDGES < <(ip -br link show type bridge 2>/dev/null | awk '$1 ~ /^vmbr[0-9]+$/ && $2!="DOWN" {print $1}')
-    [ ${#BRIDGES[@]} -eq 0 ] && { echo -e "${RED}❌ No hay bridges principales activos (ej. vmbr0)${NC}"; exit 1; }
+    [ ${#BRIDGES[@]} -eq 0 ] && { echo -e "${RED}❌  No hay bridges principales activos (ej. vmbr0)${NC}"; exit 1; }
 
     if [ ${#BRIDGES[@]} -eq 1 ]; then
         BRIDGE="${BRIDGES[0]}"
-        echo -e "  ✅ Bridge único detectado y seleccionado: ${CYAN}${BRIDGE}${NC}"
+        echo -e "  ✅  Bridge único detectado y seleccionado: ${CYAN}${BRIDGE}${NC}"
     else
     for i in "${!BRIDGES[@]}"; do
         BR_NAME="${BRIDGES[$i]}"
@@ -776,7 +776,7 @@ ask_network() {
                 BRIDGE="${BRIDGES[$((BR_IDX-1))]}"
                 break
             else
-                echo -e "${RED}❌ Índice inválido. Por favor selecciona un número del 1 al ${#BRIDGES[@]}.${NC}"
+                echo -e "${RED}❌  Índice inválido. Por favor selecciona un número del 1 al ${#BRIDGES[@]}.${NC}"
             fi
         done
     fi
@@ -788,36 +788,36 @@ ask_network() {
             VLAN_TAG=",tag=${VLAN_INPUT}"
             break
         fi
-        echo -e "${RED}❌ VLAN inválida (debe ser entre 1 y 4094)${NC}"
+        echo -e "${RED}❌  VLAN inválida (debe ser entre 1 y 4094)${NC}"
     done
 
     while true; do
         read -p "IPv4 (ej. 192.168.1.100): " IPV4_VAL
-        if valid_ipv4 "$IPV4_VAL"; then break; else echo -e "${RED}❌ IPv4 inválida${NC}"; fi
+        if valid_ipv4 "$IPV4_VAL"; then break; else echo -e "${RED}❌  IPv4 inválida${NC}"; fi
     done
 
     while true; do
         read -p "CIDR [24]: " IPV4_CIDR; IPV4_CIDR=${IPV4_CIDR:-24}
-        if valid_cidr "$IPV4_CIDR"; then break; else echo -e "${RED}❌ CIDR inválido${NC}"; fi
+        if valid_cidr "$IPV4_CIDR"; then break; else echo -e "${RED}❌  CIDR inválido${NC}"; fi
     done
 
     while true; do
         read -p "Gateway IPv4: " GW_IPV4
-        if valid_ipv4 "$GW_IPV4"; then break; else echo -e "${RED}❌ Gateway IPv4 inválido${NC}"; fi
+        if valid_ipv4 "$GW_IPV4"; then break; else echo -e "${RED}❌  Gateway IPv4 inválido${NC}"; fi
     done
 
-    echo -e "\n${BLUE}🌍 IPv6 (Opcional - Enter para omitir)${NC}"
+    echo -e "\n${BLUE}🌍  IPv6 (Opcional - Enter para omitir)${NC}"
     while true; do
         read -p "IPv6/prefijo (ej. 2803:c310:ff10::a/64): " IPV6_VAL
         [[ -z "$IPV6_VAL" ]] && break
         valid_ipv6_cidr "$IPV6_VAL" && break
-        echo -e "${RED}❌ IPv6/prefijo inválido (formato esperado dirección/prefijo, ej. 2803:c310:ff10::a/64)${NC}"
+        echo -e "${RED}❌  IPv6/prefijo inválido (formato esperado dirección/prefijo, ej. 2803:c310:ff10::a/64)${NC}"
     done
     if [[ -n "$IPV6_VAL" ]]; then
         while true; do
             read -p "Gateway IPv6: " GW_IPV6
             valid_ipv6_addr "$GW_IPV6" && break
-            echo -e "${RED}❌ Gateway IPv6 inválido${NC}"
+            echo -e "${RED}❌  Gateway IPv6 inválido${NC}"
         done
         IPV6_CONFIGURED=true
     fi
@@ -838,7 +838,7 @@ ask_network() {
         for ns in $DNS_SERVERS; do
             if ! valid_ipv4 "$ns" && ! valid_ipv6_addr "$ns"; then
                 dns_ok=false
-                echo -e "${RED}❌ '$ns' no es una IP válida (separa varios DNS con espacios)${NC}"
+                echo -e "${RED}❌  '$ns' no es una IP válida (separa varios DNS con espacios)${NC}"
                 break
             fi
         done
@@ -874,7 +874,7 @@ confirm_deployment() {
     [ "$IPV6_CONFIGURED" = true ] && echo -e "IPv6     : ${IPV6_VAL} → gw ${GW_IPV6}"
     echo -e "Hardware : ${RAM} MB RAM / ${CPU} Cores (cpu=${CPU_TYPE}${STORAGE_SSD_FLAG:+, ssd=1})"
 
-    read -p "✅ ¿Desplegar VM ahora? (s/N): " CONFIRM
+    read -p "✅  ¿Desplegar VM ahora? (s/N): " CONFIRM
 
     case "${CONFIRM,,}" in
         s|si|sí) ;;
@@ -893,7 +893,7 @@ confirm_deployment() {
 # FASE 8: GENERACIÓN YAML
 # ==============================================================================
 generate_yaml() {
-    echo -e "\n${BLUE}📝 Generando archivo de configuración Cloud-Init (${OS_TYPE})...${NC}"
+    echo -e "\n${BLUE}📝  Generando archivo de configuración Cloud-Init (${OS_TYPE})...${NC}"
 
     ( umask 077 && : > "$YAML_FILE" )
 
@@ -1077,16 +1077,16 @@ EOF
     # (abortar) — antes un python3 sin python3-yaml abortaba con falso error.
     if command -v python3 >/dev/null && python3 -c "import yaml" 2>/dev/null; then
         if python3 -c "import yaml; yaml.safe_load(open('${YAML_FILE}'))" 2>/dev/null; then
-            echo -e "  ${GREEN}✅ YAML generado y validado correctamente por Python.${NC}"
+            echo -e "  ${GREEN}✅  YAML generado y validado correctamente por Python.${NC}"
         else
-            echo -e "${RED}❌ El YAML generado tiene errores de sintaxis.${NC}"; exit 1
+            echo -e "${RED}❌  El YAML generado tiene errores de sintaxis.${NC}"; exit 1
         fi
     fi
 }
 # FASE 8b: GENERACIÓN NETWORK-CONFIG v2 (Fix /32 on-link)
 # ==============================================================================
 generate_network_yaml() {
-    echo -e "\n${BLUE}📝 Generando network-config v2 para Cloud-Init...${NC}"
+    echo -e "\n${BLUE}📝  Generando network-config v2 para Cloud-Init...${NC}"
 
     ( umask 077 && : > "$NETWORK_YAML_FILE" )
 
@@ -1142,14 +1142,14 @@ NETEOF
 NETEOF
     fi
 
-    echo -e "  ${GREEN}✅ Network-config v2 generado correctamente.${NC}"
+    echo -e "  ${GREEN}✅  Network-config v2 generado correctamente.${NC}"
 }
 
 # FASE 9: DESPLIEGUE CON SISTEMA DE LOGS
 # ==============================================================================
 deploy_vm() {
     echo -e "\n${YELLOW}🏗️  Desplegando VM ${VMID} en Proxmox...${NC}"
-    echo -e "${CYAN}📄 Guardando log de ejecución en: ${LOG_FILE}${NC}"
+    echo -e "${CYAN}📄  Guardando log de ejecución en: ${LOG_FILE}${NC}"
 
     echo "==========================================================" > "$LOG_FILE"
     echo "  LOG DE DESPLIEGUE PROXMOX - VM $VMID - $(date)" >> "$LOG_FILE"
@@ -1174,7 +1174,7 @@ deploy_vm() {
 
 **${OS_PRETTY}**
 
-## 🌐 Red
+## 🌐  Red
 
 - **IPv4:** \`${IPV4_VAL}/${IPV4_CIDR}\`  →  gateway ${GW_IPV4}"
     [ "$IPV6_CONFIGURED" = true ] && VM_DESCRIPTION="${VM_DESCRIPTION}
@@ -1184,13 +1184,13 @@ deploy_vm() {
 - **MAC net0:** \`${VM_MAC}\`  (interfaz emparejada por MAC)
 - **DNS:** ${DNS_SERVERS}
 
-## ⚙️ Hardware
+## ⚙️  Hardware
 
 - **CPU:** ${CPU} core(s)  ·  tipo \`${CPU_TYPE}\`${NET_QUEUES:+  ·  red multiqueue}
 - **RAM:** ${RAM} MB
 - **Disco:** ${DISK} GB en **${STORAGE_IMG}**${STORAGE_SSD_FLAG:+  ·  SSD (discard/TRIM)}
 
-## 💿 Sistema
+## 💿  Sistema
 
 - **SO:** ${OS_PRETTY}
 - **Imagen oficial:** ${IMAGE_NAME}
@@ -1198,8 +1198,8 @@ deploy_vm() {
 - **Acceso:** ${AUTH_DESC}
 
 ---
-📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.2
-📝 Log: ${LOG_FILE}"
+📅  Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.2
+📝  Log: ${LOG_FILE}"
 
     {
         echo "[1/3] Creando estructura base de la VM..."
@@ -1230,13 +1230,13 @@ deploy_vm() {
         qm start "$VMID"
     } >> "$LOG_FILE" 2>&1
 
-    echo -e "\n${BLUE}⏳ Esperando a que el Guest Agent responda (cloud-init terminó)...${NC}"
+    echo -e "\n${BLUE}⏳  Esperando a que el Guest Agent responda (cloud-init terminó)...${NC}"
     # 600s: con package_upgrade=true y un mirror lento, 300s daba falsos
     # "revisa cloud-init manualmente" en VMs que terminaban bien.
     local WAIT_MAX=600 WAITED=0
     while (( WAITED < WAIT_MAX )); do
         if qm guest cmd "$VMID" ping &>/dev/null; then
-            echo -e "${GREEN}✅ Guest Agent activo tras ${WAITED}s.${NC}"
+            echo -e "${GREEN}✅  Guest Agent activo tras ${WAITED}s.${NC}"
             break
         fi
         sleep 5
@@ -1250,7 +1250,7 @@ deploy_vm() {
     SUCCESS=true
 
     echo -e "\n${GREEN}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║ ✅ VM ${VMID} creada y arrancada exitosamente       ║${NC}"
+    echo -e "${GREEN}║ ✅  VM ${VMID} creada y arrancada exitosamente       ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
     echo -e "${CYAN}Terminal : qm terminal ${VMID}"
     echo -e "${CYAN}Acceso   : ssh root@${IPV4_VAL}"
