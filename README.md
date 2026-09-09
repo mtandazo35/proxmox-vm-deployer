@@ -377,10 +377,59 @@ Descarga ~1 GB de imágenes reales la primera vez (quedan cacheadas en
 
 ---
 
+## v8.3 — cambiar la IP de una VM ya creada
+
+La pestaña **Cloud-Init → IP Config** del panel de Proxmox **no funciona** en las
+VMs que crea este instalador, y no da ningún error: se cambia la IP, se pulsa
+*Regenerate Image*, se apaga y enciende… y la máquina sigue igual.
+
+Son **dos mecanismos encadenados**, hay que resolver los dos:
+
+1. **`cicustom` con `network=` anula `ipconfig0`.** El script crea la VM con
+   `--cicustom user=…,network=…snippets/network-data-<VMID>.yaml`, necesario
+   porque el generador propio de Proxmox produce cloud-init *network-config v1*,
+   que no admite `on-link` (imprescindible con un `/32` cuyo gateway está fuera
+   de la subred) y pierde la IPv6. Cuando ese `network=` existe, Proxmox entrega
+   el snippet y **descarta `ipconfig0`** — que es justo lo único que escribe la
+   pestaña del panel.
+
+   Trampa añadida: **`qm cloudinit dump <id> network` miente en este caso.**
+   Muestra lo que Proxmox generaría por su cuenta (o sea, `ipconfig0`), no el
+   snippet que de verdad se entrega. La única fuente fiable es el invitado:
+   `qm guest cmd <id> network-get-interfaces`.
+
+2. **Editar el snippet no cambia el `instance-id`.** Proxmox lo calcula a partir
+   de su propia configuración, no del contenido del snippet. Y cloud-init solo
+   reaplica la red cuando ese id cambia: si es el mismo se considera ya
+   aprovisionado y deja `/etc/netplan/50-cloud-init.yaml` intacto.
+
+Por eso existe el modo nuevo, que hace la secuencia completa:
+
+```bash
+/root/deploy-vm.sh --cambiar-ip <VMID>
+```
+
+Lee la MAC y el snippet reales de la VM, pide la IP/gateway nuevos (IPv6
+opcional), y entonces: respalda a `/root/backups/`, regenera el snippet, pone
+`ipconfig0` en sincronía (no lo lee cloud-init, pero evita que el panel muestre
+datos falsos), `qm cloudinit update`, `cloud-init clean --logs` dentro del
+invitado, **apaga y enciende** la VM —un `reboot` no vale, el disco cloud-init se
+adjunta al arrancar— y verifica la IP contra el agente invitado.
+
+Si la VM **no** usa snippet de red, lo detecta y te dice que ahí sí sirve el
+panel, sin tocar nada.
+
+> **Seguridad:** el `trap` de rollback del despliegue hace `qm destroy --purge`.
+> Este modo trabaja sobre VMs con datos, así que **lo desarma antes de nada** y
+> arma otro —solo después del respaldo— que restaura los snippets y nunca
+> destruye la VM.
+
 ## Uso
 
 ```bash
-/root/deploy-vm.sh
+/root/deploy-vm.sh                      # desplegar una VM nueva (interactivo)
+/root/deploy-vm.sh --cambiar-ip <VMID>  # cambiar IP/gateway de una existente
+/root/deploy-vm.sh --help
 ```
 
 Es interactivo. Al terminar imprime cómo entrar (`qm terminal <vmid>` /
@@ -396,5 +445,8 @@ Es interactivo. Al terminar imprime cómo entrar (`qm terminal <vmid>` /
   como confirmación de que cloud-init terminó.
 - Los snippets generados (`user-data-*.yaml` con el hash del password) quedan
   con permisos 0600 en el storage de snippets del nodo.
+- Para cambiar la IP de una VM ya creada usa `--cambiar-ip <VMID>`, **nunca** la
+  pestaña Cloud-Init del panel (ver "v8.3" arriba). Las notas de cada VM llevan
+  ese recordatorio.
 - `.gitattributes` fuerza `eol=lf`: un CRLF hace que Linux responda
   `No such file or directory` al ejecutar el script.

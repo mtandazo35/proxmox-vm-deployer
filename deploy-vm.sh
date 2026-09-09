@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Cloud-Init Proxmox - Instalador Modular V8.2
+# Cloud-Init Proxmox - Instalador Modular V8.3
 # Cambios 8.0: red por MAC fija (OUI Proxmox) en vez de match por driver/nombre
 # Cambios 8.1: set -E + trap EXIT (rollback cubre fallos dentro de funciones),
 # checksum por nombre remoto (Ubuntu nunca se verificaba), validación AUTH_MODE/
@@ -11,6 +11,12 @@
 # hash), así 'latest'/'current' al republicar ya no invalidan lo descargado; una
 # build nueva se ofrece en vez de imponerse (IMAGE_REFRESH=ask|never|always),
 # fallback a la build anterior si el mirror falla, y purga opcional de builds viejas
+# Cambios 8.3: modo `--cambiar-ip <VMID>` para reconfigurar la red de una VM ya
+# creada. Hace falta porque con `cicustom network=` el campo "IP Config" del panel
+# NO se aplica (manda el snippet) y ademas editar el snippet no cambia el
+# instance-id, asi que cloud-init se cree ya aprovisionado y no reescribe netplan:
+# hay que regenerar snippet + ipconfig0, `cloud-init clean` y apagar/encender.
+# Se avisa de esa trampa al terminar el despliegue y en las notas de la VM.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -28,6 +34,15 @@ OS_TYPE="debian"; OS_PRETTY=""
 CPU_TYPE="host"; STORAGE_SSD_FLAG=""
 SUCCESS=false; ROLLBACK_EXECUTED=false; LOG_FILE=""; NETWORK_YAML_FILE=""; YAML_FILE=""
 VM_MAC=""; IMG_MIN_GB="2"; PERMIT_ROOT_LOGIN=""
+IPV6_VAL=""
+MODE="deploy"; TARGET_VMID=""
+
+case "${1:-}" in
+    --cambiar-ip|--change-ip) MODE="change-ip"; TARGET_VMID="${2:-}" ;;
+    -h|--help)                MODE="help" ;;
+    "")                       ;;
+    *) echo "Opcion desconocida: $1 (usa --help)" >&2; exit 1 ;;
+esac
 
 # ==================== FUNCIONES DE VALIDACIÓN Y CONTROL ====================
 valid_ipv4() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { IFS='.' read -r a b c d <<< "$1"; (( a<=255 && b<=255 && c<=255 && d<=255 )); }; }
@@ -1198,7 +1213,14 @@ deploy_vm() {
 - **Acceso:** ${AUTH_DESC}
 
 ---
-==> Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.2
+## ==> Como cambiar la IP
+
+> La pestana **Cloud-Init -> IP Config** del panel **no funciona** en esta VM:
+> lleva `cicustom` con snippet de red y Proxmox descarta ese campo.
+> Usa `deploy-vm.sh --cambiar-ip ${VMID}` en el nodo.
+
+---
+==> Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.3
 ==> Log: ${LOG_FILE}"
 
     {
@@ -1255,20 +1277,203 @@ deploy_vm() {
     echo -e "${CYAN}Terminal : qm terminal ${VMID}"
     echo -e "${CYAN}Acceso   : ssh root@${IPV4_VAL}"
     echo -e "${CYAN}Log      : ${LOG_FILE}${NC}\n"
+
+    echo -e "${YELLOW}[AVISO] Para cambiar la IP de esta VM NO uses la pestana Cloud-Init${NC}"
+    echo -e "${YELLOW}        del panel: lleva snippet de red (cicustom) y ese campo se ignora.${NC}"
+    echo -e "${YELLOW}        Usa:  $0 --cambiar-ip ${VMID}${NC}\n"
+}
+
+
+# ==============================================================================
+# MODO --cambiar-ip: reconfigurar la red de una VM YA existente
+# ==============================================================================
+show_help() {
+    cat <<'AYUDA'
+deploy-vm.sh v8.3 - instalador de VMs Proxmox por cloud-init
+
+  deploy-vm.sh                      Despliegue interactivo de una VM nueva.
+  deploy-vm.sh --cambiar-ip <VMID>  Cambia la IP/gateway de una VM ya creada.
+  deploy-vm.sh --help               Esta ayuda.
+
+POR QUE HACE FALTA --cambiar-ip
+  Las VMs creadas por este script usan `cicustom` con un snippet de red. Cuando
+  ese snippet existe, Proxmox lo entrega y DESCARTA el campo "IP Config (net0)"
+  de la pestana Cloud-Init: cambiarlo ahi no tiene ningun efecto, y no da error.
+  Ademas el instance-id se calcula de la config de Proxmox y NO del snippet, asi
+  que editar el .yaml a mano tampoco basta: cloud-init se cree ya aprovisionado
+  y deja el netplan como estaba. --cambiar-ip hace la secuencia completa.
+AYUDA
+}
+
+# Ruta real del directorio de snippets de un storage dado.
+snippet_dir_for_storage() {
+    local st="$1" base
+    base=$(pvesh get "/storage/${st}" --output-format json 2>/dev/null \
+        | python3 -c 'import json,sys;print(json.load(sys.stdin).get("path",""))' 2>/dev/null || true)
+    [ -z "$base" ] && base=$(awk "/^dir: ${st}\$/{f=1;next} f&&/^\\s*path /{print \$2;exit}" /etc/pve/storage.cfg 2>/dev/null)
+    [ -z "$base" ] && base="/var/lib/vz"
+    echo "${base}/snippets"
+}
+
+CHIP_BACKUP=""
+change_ip_rollback() {
+    local rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    set +e
+    echo -e "\n${RED}[ERROR] Fallo al cambiar la IP.${NC}"
+    if [ -n "$CHIP_BACKUP" ] && [ -f "$CHIP_BACKUP" ]; then
+        tar xzf "$CHIP_BACKUP" -C / 2>/dev/null \
+            && echo -e "${YELLOW}==> Snippets restaurados desde ${CHIP_BACKUP}${NC}"
+    fi
+    echo -e "${YELLOW}==> La VM NO se ha destruido. Revisa y reintenta.${NC}"
+    exit 1
+}
+
+change_vm_ip() {
+    # PRIMERO de todo: el trap del despliegue hace `qm destroy $VMID --purge`
+    # ante cualquier error o Ctrl+C. Aqui trabajamos sobre una VM existente CON
+    # DATOS, asi que se desarma antes de tocar nada y se pone uno que solo
+    # restaura los snippets.
+    # Se queda SIN trap durante las validaciones (todavia no hay nada que
+    # revertir); el de restauracion se arma justo despues del respaldo.
+    trap - INT TERM ERR EXIT
+
+    local id="$1"
+    [ -z "$id" ] && { echo -e "${RED}[ERROR] Falta el VMID. Uso: $0 --cambiar-ip <VMID>${NC}"; exit 1; }
+    [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${RED}[ERROR] VMID invalido: ${id}${NC}"; exit 1; }
+    qm config "$id" &>/dev/null || { echo -e "${RED}[ERROR] La VM ${id} no existe en este nodo.${NC}"; exit 1; }
+
+    local conf vmname
+    conf=$(qm config "$id")
+    vmname=$(awk -F': ' '/^name:/{print $2}' <<< "$conf")
+    echo -e "\n${BLUE}==> Cambiar red de la VM ${id} (${vmname})${NC}"
+
+    # El snippet hace match por MAC: si no es la del net0, netplan no aplica nada.
+    VM_MAC=$(grep -oP '^net0:.*?virtio=\K[0-9A-Fa-f:]{17}' <<< "$conf" || true)
+    [ -z "$VM_MAC" ] && { echo -e "${RED}[ERROR] No se pudo leer la MAC de net0.${NC}"; exit 1; }
+
+    local cic netref
+    cic=$(awk -F': ' '/^cicustom:/{print $2}' <<< "$conf" || true)
+    if [ -z "$cic" ] || [[ "$cic" != *"network="* ]]; then
+        echo -e "${YELLOW}[AVISO] Esta VM no usa snippet de red: aqui SI manda 'ipconfig0'.${NC}"
+        echo -e "${YELLOW}        Puedes cambiarla desde el panel (Cloud-Init -> IP Config) y luego${NC}"
+        echo -e "${YELLOW}        'Regenerate Image' + apagar/encender. No hace falta este modo.${NC}"
+        exit 0
+    fi
+    netref=$(grep -oP 'network=\K[^,]+' <<< "$cic")
+    SNIPPET_FULL_PATH=$(snippet_dir_for_storage "${netref%%:*}")
+    NETWORK_YAML_FILE="${SNIPPET_FULL_PATH}/network-data-${id}.yaml"
+    [ -f "$NETWORK_YAML_FILE" ] || { echo -e "${RED}[ERROR] No existe ${NETWORK_YAML_FILE}${NC}"; exit 1; }
+
+    echo -e "\n${CYAN}--- Configuracion actual (la que de verdad se aplica) ---${NC}"
+    grep -E '^\s+(- [0-9a-fA-F]|addresses:|via:|on-link:)' "$NETWORK_YAML_FILE" || true
+    echo -e "${CYAN}---------------------------------------------------------${NC}"
+
+    # ---- nueva IPv4 ----
+    while true; do
+        read -p "Nueva IPv4 (formato IP/CIDR, ej. 192.0.2.10/24): " NEW_IP
+        IPV4_VAL="${NEW_IP%%/*}"; IPV4_CIDR="${NEW_IP##*/}"
+        if [ "$NEW_IP" = "$IPV4_VAL" ]; then
+            echo -e "${RED}[ERROR] Falta el prefijo (/24, /32...).${NC}"; continue
+        fi
+        valid_ipv4 "$IPV4_VAL" && valid_cidr "$IPV4_CIDR" && break
+        echo -e "${RED}[ERROR] IP o prefijo invalidos.${NC}"
+    done
+    while true; do
+        read -p "Gateway IPv4: " GW_IPV4
+        valid_ipv4 "$GW_IPV4" && break
+        echo -e "${RED}[ERROR] Gateway invalido.${NC}"
+    done
+    [ "$IPV4_CIDR" -eq 32 ] && echo -e "${YELLOW}[AVISO] /32: se activara on-link para el gateway.${NC}"
+
+    # ---- IPv6 opcional ----
+    IPV6_CONFIGURED=false; IPV6_VAL=""; GW_IPV6=""
+    read -p "IPv6 (Enter para omitir, ej. 2001:db8::10/64): " NEW_IP6
+    if [ -n "$NEW_IP6" ]; then
+        IPV6_VAL="$NEW_IP6"; IPV6_CONFIGURED=true
+        read -p "Gateway IPv6 (Enter para omitir): " GW_IPV6
+    fi
+
+    # ---- DNS: se conserva el de la VM ----
+    DNS_SERVERS=$(awk -F': ' '/^nameserver:/{print $2}' <<< "$conf" || true)
+    [ -z "$DNS_SERVERS" ] && DNS_SERVERS="8.8.8.8 1.1.1.1"
+
+    echo -e "\n${YELLOW}==> Se aplicara a la VM ${id}: ${IPV4_VAL}/${IPV4_CIDR} gw ${GW_IPV4}${NC}"
+    echo -e "${YELLOW}    Implica APAGAR y ENCENDER la VM (no vale reboot).${NC}"
+    read -p "Confirmas? (s/N): " OK
+    [[ "$OK" =~ ^[sS]$ ]] || { echo "Cancelado."; trap - EXIT; exit 0; }
+
+    mkdir -p /root/backups
+    CHIP_BACKUP="/root/backups/pre-cambiar-ip-${id}-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar czf "$CHIP_BACKUP" "$NETWORK_YAML_FILE" "/etc/pve/qemu-server/${id}.conf" 2>/dev/null || true
+    echo -e "${GREEN}[OK] Respaldo: ${CHIP_BACKUP}${NC}"
+    trap change_ip_rollback EXIT
+
+    # 1) el snippet, que es lo que de verdad se entrega
+    generate_network_yaml
+
+    # 2) ipconfig0 en sincronia: no lo lee cloud-init, pero evita que el panel
+    #    muestre datos falsos y ademas hace que cambie el instance-id.
+    IPCONFIG="ip=${IPV4_VAL}/${IPV4_CIDR},gw=${GW_IPV4}"
+    [ "$IPV6_CONFIGURED" = true ] && [ -n "$GW_IPV6" ] && IPCONFIG="${IPCONFIG},ip6=${IPV6_VAL},gw6=${GW_IPV6}"
+    qm set "$id" --ipconfig0 "$IPCONFIG" >/dev/null
+
+    # 3) regenerar el disco cloud-init
+    qm cloudinit update "$id" >/dev/null
+
+    # 4) forzar el reaprovisionamiento dentro del invitado: sin esto cloud-init
+    #    ve el mismo estado y NO reescribe /etc/netplan/50-cloud-init.yaml
+    if qm status "$id" 2>/dev/null | grep -q running; then
+        echo -e "${BLUE}==> Limpiando estado de cloud-init dentro de la VM...${NC}"
+        qm guest exec "$id" --timeout 60 -- /bin/sh -c 'cloud-init clean --logs' >/dev/null 2>&1 \
+            || echo -e "${YELLOW}[AVISO] No se pudo ejecutar 'cloud-init clean' (agente invitado?).${NC}"
+        echo -e "${BLUE}==> Apagando la VM...${NC}"
+        qm stop "$id" >/dev/null 2>&1 || true
+        for _ in $(seq 1 30); do qm status "$id" 2>/dev/null | grep -q stopped && break; sleep 2; done
+    fi
+
+    echo -e "${BLUE}==> Arrancando la VM...${NC}"
+    qm start "$id" >/dev/null
+
+    # 5) comprobar contra el invitado, que es la unica fuente fiable
+    echo -e "${BLUE}==> Verificando la IP dentro de la VM...${NC}"
+    local got=""
+    for _ in $(seq 1 45); do
+        got=$(qm guest cmd "$id" network-get-interfaces 2>/dev/null \
+              | grep -o '"ip-address" : "[^"]*"' | cut -d'"' -f4 | grep -x "$IPV4_VAL" || true)
+        [ -n "$got" ] && break
+        sleep 5
+    done
+
+    SUCCESS=true
+    trap - EXIT
+    if [ -n "$got" ]; then
+        echo -e "\n${GREEN}[OK] La VM ${id} responde con ${IPV4_VAL}.${NC}"
+    else
+        echo -e "\n${YELLOW}[AVISO] La VM arranco pero el agente aun no reporta ${IPV4_VAL}.${NC}"
+        echo -e "${YELLOW}        Comprueba con: qm guest cmd ${id} network-get-interfaces${NC}"
+        echo -e "${YELLOW}        Respaldo por si hay que volver atras: ${CHIP_BACKUP}${NC}"
+    fi
 }
 
 # ==============================================================================
 # EJECUCIÓN PRINCIPAL
 # ==============================================================================
-select_os_and_download
-detect_cpu_type
-auto_select_image_storage
-ask_snippet_storage
-ask_vmid_and_name
-ask_auth_mode
-ask_network
-ask_resources
-confirm_deployment
-generate_yaml
-generate_network_yaml
-deploy_vm
+case "$MODE" in
+    help)      trap - INT TERM ERR EXIT; show_help ;;
+    change-ip) change_vm_ip "$TARGET_VMID" ;;
+    deploy)
+        select_os_and_download
+        detect_cpu_type
+        auto_select_image_storage
+        ask_snippet_storage
+        ask_vmid_and_name
+        ask_auth_mode
+        ask_network
+        ask_resources
+        confirm_deployment
+        generate_yaml
+        generate_network_yaml
+        deploy_vm
+        ;;
+esac
