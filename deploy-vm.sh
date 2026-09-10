@@ -1216,8 +1216,8 @@ deploy_vm() {
 ## 🛠️ Como cambiar la IP
 
 > La pestana **Cloud-Init -> IP Config** del panel **no funciona** en esta VM:
-> lleva `cicustom` con snippet de red y Proxmox descarta ese campo.
-> Usa `deploy-vm.sh --cambiar-ip ${VMID}` en el nodo.
+> lleva \`cicustom\` con snippet de red y Proxmox descarta ese campo.
+> Usa \`deploy-vm.sh --cambiar-ip ${VMID}\` en el nodo.
 
 ---
 📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.3
