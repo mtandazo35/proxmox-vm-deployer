@@ -1189,7 +1189,7 @@ deploy_vm() {
 
 **${OS_PRETTY}**
 
-## ==> Red
+## 🌐 Red
 
 - **IPv4:** \`${IPV4_VAL}/${IPV4_CIDR}\`  →  gateway ${GW_IPV4}"
     [ "$IPV6_CONFIGURED" = true ] && VM_DESCRIPTION="${VM_DESCRIPTION}
@@ -1199,13 +1199,13 @@ deploy_vm() {
 - **MAC net0:** \`${VM_MAC}\`  (interfaz emparejada por MAC)
 - **DNS:** ${DNS_SERVERS}
 
-## ==> Hardware
+## ⚙️ Hardware
 
 - **CPU:** ${CPU} core(s)  ·  tipo \`${CPU_TYPE}\`${NET_QUEUES:+  ·  red multiqueue}
 - **RAM:** ${RAM} MB
 - **Disco:** ${DISK} GB en **${STORAGE_IMG}**${STORAGE_SSD_FLAG:+  ·  SSD (discard/TRIM)}
 
-## ==> Sistema
+## 💿 Sistema
 
 - **SO:** ${OS_PRETTY}
 - **Imagen oficial:** ${IMAGE_NAME}
@@ -1213,15 +1213,15 @@ deploy_vm() {
 - **Acceso:** ${AUTH_DESC}
 
 ---
-## ==> Como cambiar la IP
+## 🛠️ Como cambiar la IP
 
 > La pestana **Cloud-Init -> IP Config** del panel **no funciona** en esta VM:
 > lleva `cicustom` con snippet de red y Proxmox descarta ese campo.
 > Usa `deploy-vm.sh --cambiar-ip ${VMID}` en el nodo.
 
 ---
-==> Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.3
-==> Log: ${LOG_FILE}"
+📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.3
+📝 Log: ${LOG_FILE}"
 
     {
         echo "[1/3] Creando estructura base de la VM..."
