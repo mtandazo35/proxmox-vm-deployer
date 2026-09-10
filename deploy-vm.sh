@@ -54,7 +54,10 @@ case "${1:-}" in
     "")                       ;;
     *) echo "Opcion desconocida: $1 (usa --help)" >&2; exit 1 ;;
 esac
-[ "${2:-}" = "--sin-actualizar" ] || [ "${2:-}" = "--no-update" ] && SELF_UPDATE=0
+# --sin-actualizar vale en cualquier posicion (p.ej. --cambiar-ip 102 --sin-actualizar)
+for _a in "$@"; do
+    case "$_a" in --sin-actualizar|--no-update) SELF_UPDATE=0 ;; esac
+done
 
 # ==================== AUTOACTUALIZACION ====================
 # Descarga la ultima version, la valida y se reejecuta. Todo fallo es NO
