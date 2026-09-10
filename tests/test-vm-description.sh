@@ -7,6 +7,9 @@ SRC="${1:?ruta a deploy-vm.sh}"
 
 GREEN=""; YELLOW=""; RED=""; BLUE=""; CYAN=""; NC=""
 eval "$(sed -n '/^net_snippet_needed()/,/^}/p' "$SRC")"
+# la version se lee del propio script para que el test no se descuadre
+VERSION=$(grep -m1 '^VERSION="' "$SRC" | cut -d'"' -f2)
+[ -n "$VERSION" ] || { echo "no se pudo leer VERSION de $SRC" >&2; exit 1; }
 
 BLOQUE=$(sed -n '/^    # OJO: nada de/,/^📝 Log: \${LOG_FILE}"$/p' "$SRC")
 
@@ -30,6 +33,7 @@ probar() {
     echo "cicustom : $CIC"
     echo "--- lo que veria el usuario en las notas de la VM ---"
     echo "$VM_DESCRIPTION" | sed -n '/Como cambiar la IP/,/^---$/p'
+    echo "$VM_DESCRIPTION" | grep -E "deploy-vm.sh v" | sed "s/^/pie: /"
     echo
 }
 
