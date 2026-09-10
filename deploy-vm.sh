@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Cloud-Init Proxmox - Instalador Modular V8.5
+# Cloud-Init Proxmox - Instalador Modular V8.6
 # Cambios 8.0: red por MAC fija (OUI Proxmox) en vez de match por driver/nombre
 # Cambios 8.1: set -E + trap EXIT (rollback cubre fallos dentro de funciones),
 # checksum por nombre remoto (Ubuntu nunca se verificaba), validación AUTH_MODE/
@@ -25,6 +25,12 @@
 # Cambios 8.5: el script se autoactualiza al arrancar (descarga la ultima version
 # de GitHub, la valida y se reejecuta), y la version vive en una sola variable
 # para que la ayuda y las notas de la VM no se descuadren.
+# Cambios 8.6: auditoria de la v8.5 (ver AUDITORIA-v8.5.md). Se corrigen los
+# tres hallazgos altos, todos en --cambiar-ip: no validaba la IPv6 (A1), en una
+# VM sin cicustom escribia el snippet sin referenciarlo y no aplicaba nada en
+# silencio (A2), y si la VM no se apagaba en 60s daba un error enganoso (A3).
+# Ademas: DNS leido del snippet, ip6 siempre en ipconfig0, la confirmacion
+# acepta si/yes, y todas las lecturas pasan a 'read -r'.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -43,7 +49,7 @@ CPU_TYPE="host"; STORAGE_SSD_FLAG=""
 SUCCESS=false; ROLLBACK_EXECUTED=false; LOG_FILE=""; NETWORK_YAML_FILE=""; YAML_FILE=""
 VM_MAC=""; IMG_MIN_GB="2"; PERMIT_ROOT_LOGIN=""
 IPV6_VAL=""
-VERSION="8.5"
+VERSION="8.6"
 SCRIPT_URL="https://raw.githubusercontent.com/mtandazo35/proxmox-vm-deployer/master/deploy-vm.sh"
 MODE="deploy"; TARGET_VMID=""; SELF_UPDATE=1
 
@@ -107,7 +113,8 @@ self_update() {
 self_update "$@"
 
 # ==================== FUNCIONES DE VALIDACIÓN Y CONTROL ====================
-valid_ipv4() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { IFS='.' read -r a b c d <<< "$1"; (( a<=255 && b<=255 && c<=255 && d<=255 )); }; }
+# B1: a/b/c/d en local, antes contaminaban el espacio global de nombres.
+valid_ipv4() { local a b c d; [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { IFS='.' read -r a b c d <<< "$1"; (( a<=255 && b<=255 && c<=255 && d<=255 )); }; }
 valid_cidr() { [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= 0 && $1 <= 32 )); }
 valid_ipv6_addr() {
     local addr="$1"
@@ -357,7 +364,7 @@ select_os_and_download() {
     echo "  4) Ubuntu 22.04 LTS (Jammy Jellyfish)"
     echo "  5) Ubuntu 24.04 LTS (Noble Numbat)"
     
-    read -p "Opción [1]: " OS_OPT; OS_OPT=${OS_OPT:-1}
+    read -r -p "Opción [1]: " OS_OPT; OS_OPT=${OS_OPT:-1}
 
     case "$OS_OPT" in
         1)
@@ -585,7 +592,7 @@ auto_select_image_storage() {
         echo -e "  ${GREEN}[OK] Storage único seleccionado: ${CYAN}$STORAGE_IMG${NC}"
     else
         while true; do
-            read -p "Selecciona storage para disco VM [1]: " IMG_IDX; IMG_IDX=${IMG_IDX:-1}
+            read -r -p "Selecciona storage para disco VM [1]: " IMG_IDX; IMG_IDX=${IMG_IDX:-1}
             if [[ "$IMG_IDX" =~ ^[0-9]+$ ]] && (( IMG_IDX >= 1 && IMG_IDX <= ${#STORAGES_IMG[@]} )); then
                 STORAGE_IMG="${STORAGES_IMG[$((IMG_IDX-1))]}"
                 break
@@ -652,7 +659,7 @@ ask_snippet_storage() {
             echo "  $((i+1))) ${S} (${S_TYPE})"
         done
         while true; do
-            read -p "Selecciona storage para snippets/cloud-init [1]: " SNIP_IDX; SNIP_IDX=${SNIP_IDX:-1}
+            read -r -p "Selecciona storage para snippets/cloud-init [1]: " SNIP_IDX; SNIP_IDX=${SNIP_IDX:-1}
             if [[ "$SNIP_IDX" =~ ^[0-9]+$ ]] && (( SNIP_IDX >= 1 && SNIP_IDX <= ${#TIED[@]} )); then
                 STORAGE_SNIP="${TIED[$((SNIP_IDX-1))]}"
                 break
@@ -695,7 +702,7 @@ ask_vmid_and_name() {
     echo -e "\n${BLUE}==> Identificación de la Máquina Virtual${NC}"
     while true; do
         PROXIMO_ID=$(pvesh get /cluster/nextid 2>/dev/null || echo "100")
-        read -p "ID VM [$PROXIMO_ID]: " INPUT_VMID
+        read -r -p "ID VM [$PROXIMO_ID]: " INPUT_VMID
         VMID=${INPUT_VMID:-$PROXIMO_ID}
         
         if ! [[ "$VMID" =~ ^[0-9]+$ ]] || [ "$VMID" -lt 100 ]; then
@@ -713,7 +720,7 @@ ask_vmid_and_name() {
     LOG_FILE="/var/log/proxmox-deploy/deploy_VM${VMID}_$(date +%Y%m%d-%H%M%S).log"
 
     while true; do
-        read -p "Nombre VM (ej. webserver-01): " NOMBRE
+        read -r -p "Nombre VM (ej. webserver-01): " NOMBRE
         if [[ -z "$NOMBRE" ]]; then
             echo -e "${RED}[ERROR] El nombre es obligatorio.${NC}"
         elif ! [[ "$NOMBRE" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
@@ -728,17 +735,17 @@ ask_resources() {
     echo -e "\n${BLUE}==> Recursos de Hardware${NC}"
     
     while true; do
-        read -p "RAM MB [2048]: " RAM; RAM=${RAM:-2048}
+        read -r -p "RAM MB [2048]: " RAM; RAM=${RAM:-2048}
         [[ "$RAM" =~ ^[0-9]+$ ]] && (( RAM >= 512 )) && break || echo -e "${RED}[ERROR] RAM inválida (mínimo 512)${NC}"
     done
     
     while true; do
-        read -p "CPU cores [2]: " CPU; CPU=${CPU:-2}
+        read -r -p "CPU cores [2]: " CPU; CPU=${CPU:-2}
         [[ "$CPU" =~ ^[0-9]+$ ]] && (( CPU >= 1 )) && break || echo -e "${RED}[ERROR] CPU inválida (mínimo 1)${NC}"
     done
     
     while true; do
-        read -p "Disco GB [20]: " DISK; DISK=${DISK:-20}
+        read -r -p "Disco GB [20]: " DISK; DISK=${DISK:-20}
         # Mínimo = tamaño virtual de la imagen (qm resize no puede encoger)
         [[ "$DISK" =~ ^[0-9]+$ ]] && (( DISK >= IMG_MIN_GB )) || { echo -e "${RED}[ERROR] Disco mínimo ${IMG_MIN_GB}GB (la imagen ${IMAGE_NAME} no se puede encoger)${NC}"; continue; }
 
@@ -766,15 +773,15 @@ ask_auth_mode() {
     # Validar: un typo aquí (ej. "4") dejaba una VM SIN password y SIN claves
     # — completamente inaccesible, incluso por consola serial.
     while true; do
-        read -p "Opción [3]: " AUTH_MODE; AUTH_MODE=${AUTH_MODE:-3}
+        read -r -p "Opción [3]: " AUTH_MODE; AUTH_MODE=${AUTH_MODE:-3}
         [[ "$AUTH_MODE" =~ ^[123]$ ]] && break
         echo -e "${RED}[ERROR] Opción inválida. Debe ser 1, 2 o 3.${NC}"
     done
 
     if [[ "$AUTH_MODE" == "1" ]] || [[ "$AUTH_MODE" == "3" ]]; then
         while true; do
-            read -s -p "Password root: " PASS1; echo
-            read -s -p "Confirma: " PASS2; echo
+            read -r -s -p "Password root: " PASS1; echo
+            read -r -s -p "Confirma: " PASS2; echo
             [[ "$PASS1" == "$PASS2" && -n "$PASS1" ]] && break
             echo -e "${RED}[ERROR] Las contraseñas no coinciden${NC}"
         done
@@ -801,6 +808,7 @@ ask_auth_mode() {
 
     if [[ "$AUTH_MODE" == "2" || "$AUTH_MODE" == "3" ]]; then
         echo -e "${YELLOW}Pega tus claves SSH públicas (una por línea, presiona Enter en una línea vacía para terminar):${NC}"
+        local line
         while IFS= read -r line; do
             [[ -z "$line" ]] && break
             # Validar formato: una clave truncada/typo en modo 2 = VM inaccesible
@@ -847,7 +855,7 @@ ask_network() {
         [ -n "$BR_COMMENT" ] && echo "  $((i+1))) ${BR_NAME} (${BR_COMMENT})" || echo "  $((i+1))) ${BR_NAME}"
     done
         while true; do
-            read -p "Selecciona Bridge [1]: " BR_IDX
+            read -r -p "Selecciona Bridge [1]: " BR_IDX
             BR_IDX=${BR_IDX:-1}
             if [[ "$BR_IDX" =~ ^[0-9]+$ ]] && (( BR_IDX >= 1 && BR_IDX <= ${#BRIDGES[@]} )); then
                 BRIDGE="${BRIDGES[$((BR_IDX-1))]}"
@@ -859,7 +867,7 @@ ask_network() {
     fi
 
     while true; do
-        read -p "VLAN ID (Enter para omitir, sin VLAN): " VLAN_INPUT
+        read -r -p "VLAN ID (Enter para omitir, sin VLAN): " VLAN_INPUT
         [[ -z "$VLAN_INPUT" ]] && break
         if [[ "$VLAN_INPUT" =~ ^[0-9]+$ ]] && (( VLAN_INPUT >= 1 && VLAN_INPUT <= 4094 )); then
             VLAN_TAG=",tag=${VLAN_INPUT}"
@@ -869,30 +877,30 @@ ask_network() {
     done
 
     while true; do
-        read -p "IPv4 (ej. 192.168.1.100): " IPV4_VAL
+        read -r -p "IPv4 (ej. 192.168.1.100): " IPV4_VAL
         if valid_ipv4 "$IPV4_VAL"; then break; else echo -e "${RED}[ERROR] IPv4 inválida${NC}"; fi
     done
 
     while true; do
-        read -p "CIDR [24]: " IPV4_CIDR; IPV4_CIDR=${IPV4_CIDR:-24}
+        read -r -p "CIDR [24]: " IPV4_CIDR; IPV4_CIDR=${IPV4_CIDR:-24}
         if valid_cidr "$IPV4_CIDR"; then break; else echo -e "${RED}[ERROR] CIDR inválido${NC}"; fi
     done
 
     while true; do
-        read -p "Gateway IPv4: " GW_IPV4
+        read -r -p "Gateway IPv4: " GW_IPV4
         if valid_ipv4 "$GW_IPV4"; then break; else echo -e "${RED}[ERROR] Gateway IPv4 inválido${NC}"; fi
     done
 
     echo -e "\n${BLUE}==> IPv6 (Opcional - Enter para omitir)${NC}"
     while true; do
-        read -p "IPv6/prefijo (ej. 2803:c310:ff10::a/64): " IPV6_VAL
+        read -r -p "IPv6/prefijo (ej. 2803:c310:ff10::a/64): " IPV6_VAL
         [[ -z "$IPV6_VAL" ]] && break
         valid_ipv6_cidr "$IPV6_VAL" && break
         echo -e "${RED}[ERROR] IPv6/prefijo inválido (formato esperado dirección/prefijo, ej. 2803:c310:ff10::a/64)${NC}"
     done
     if [[ -n "$IPV6_VAL" ]]; then
         while true; do
-            read -p "Gateway IPv6: " GW_IPV6
+            read -r -p "Gateway IPv6: " GW_IPV6
             valid_ipv6_addr "$GW_IPV6" && break
             echo -e "${RED}[ERROR] Gateway IPv6 inválido${NC}"
         done
@@ -909,7 +917,7 @@ ask_network() {
     # texto arbitrario rompería la resolución del guest en silencio.
     local ns dns_ok
     while true; do
-        read -p "DNS [$DEFAULT_DNS]: " DNS_INPUT
+        read -r -p "DNS [$DEFAULT_DNS]: " DNS_INPUT
         DNS_SERVERS=${DNS_INPUT:-$DEFAULT_DNS}
         dns_ok=true
         for ns in $DNS_SERVERS; do
@@ -951,7 +959,7 @@ confirm_deployment() {
     [ "$IPV6_CONFIGURED" = true ] && echo -e "IPv6     : ${IPV6_VAL} → gw ${GW_IPV6}"
     echo -e "Hardware : ${RAM} MB RAM / ${CPU} Cores (cpu=${CPU_TYPE}${STORAGE_SSD_FLAG:+, ssd=1})"
 
-    read -p "[OK] ¿Desplegar VM ahora? (s/N): " CONFIRM
+    read -r -p "[OK] ¿Desplegar VM ahora? (s/N): " CONFIRM
 
     case "${CONFIRM,,}" in
         s|si|sí) ;;
@@ -1513,7 +1521,7 @@ change_vm_ip() {
 
     # ---- nueva IPv4 ----
     while true; do
-        read -p "Nueva IPv4 (formato IP/CIDR, ej. 192.0.2.10/24): " NEW_IP
+        read -r -p "Nueva IPv4 (formato IP/CIDR, ej. 192.0.2.10/24): " NEW_IP
         IPV4_VAL="${NEW_IP%%/*}"; IPV4_CIDR="${NEW_IP##*/}"
         if [ "$NEW_IP" = "$IPV4_VAL" ]; then
             echo -e "${RED}[ERROR] Falta el prefijo (/24, /32...).${NC}"; continue
@@ -1522,28 +1530,51 @@ change_vm_ip() {
         echo -e "${RED}[ERROR] IP o prefijo invalidos.${NC}"
     done
     while true; do
-        read -p "Gateway IPv4: " GW_IPV4
+        read -r -p "Gateway IPv4: " GW_IPV4
         valid_ipv4 "$GW_IPV4" && break
         echo -e "${RED}[ERROR] Gateway invalido.${NC}"
     done
     [ "$IPV4_CIDR" -eq 32 ] && echo -e "${YELLOW}[AVISO] /32: se activara on-link para el gateway.${NC}"
 
     # ---- IPv6 opcional ----
+    # A1: se valida igual que en el despliegue. Una IPv6 con un typo hace que
+    # netplan rechace el fichero ENTERO y la VM arranque sin red; como este modo
+    # apaga y enciende, dejaria sin acceso una VM que funcionaba.
     IPV6_CONFIGURED=false; IPV6_VAL=""; GW_IPV6=""
-    read -p "IPv6 (Enter para omitir, ej. 2001:db8::10/64): " NEW_IP6
-    if [ -n "$NEW_IP6" ]; then
-        IPV6_VAL="$NEW_IP6"; IPV6_CONFIGURED=true
-        read -p "Gateway IPv6 (Enter para omitir): " GW_IPV6
-    fi
+    while true; do
+        read -r -p "IPv6 (Enter para omitir, ej. 2001:db8::10/64): " NEW_IP6
+        [ -z "$NEW_IP6" ] && break
+        if valid_ipv6_cidr "$NEW_IP6"; then
+            IPV6_VAL="$NEW_IP6"; IPV6_CONFIGURED=true
+            while true; do
+                read -r -p "Gateway IPv6 (Enter para omitir): " GW_IPV6
+                [ -z "$GW_IPV6" ] && break
+                valid_ipv6_addr "$GW_IPV6" && break
+                echo -e "${RED}[ERROR] Gateway IPv6 invalido.${NC}"
+            done
+            break
+        fi
+        echo -e "${RED}[ERROR] IPv6 invalida. Formato: direccion/prefijo (ej. 2001:db8::10/64).${NC}"
+    done
 
     # ---- DNS: se conserva el de la VM ----
+    # M1: si el DNS solo vive en el snippet (no en 'nameserver:' de Proxmox),
+    # hay que leerlo de ahi antes de caer a los publicos: pisar el resolver de
+    # un ISP con 8.8.8.8 lo sacaria de su propia jerarquia.
     DNS_SERVERS=$(awk -F': ' '/^nameserver:/{print $2}' <<< "$conf" || true)
+    if [ -z "$DNS_SERVERS" ] && [ -f "$NETWORK_YAML_FILE" ]; then
+        DNS_SERVERS=$(awk '/nameservers:/{f=1;next} f&&/^ *addresses:/{next} f&&/^ *- /{gsub(/[- ]/,"");printf "%s ",$0;next} f&&NF{exit}' "$NETWORK_YAML_FILE" || true)
+        DNS_SERVERS="${DNS_SERVERS% }"
+        [ -n "$DNS_SERVERS" ] && echo -e "  ${CYAN}[INFO] DNS tomado del snippet: ${DNS_SERVERS}${NC}"
+    fi
     [ -z "$DNS_SERVERS" ] && DNS_SERVERS="8.8.8.8 1.1.1.1"
 
     echo -e "\n${YELLOW}==> Se aplicara a la VM ${id}: ${IPV4_VAL}/${IPV4_CIDR} gw ${GW_IPV4}${NC}"
     echo -e "${YELLOW}    Implica APAGAR y ENCENDER la VM (no vale reboot).${NC}"
-    read -p "Confirmas? (s/N): " OK
-    [[ "$OK" =~ ^[sS]$ ]] || { echo "Cancelado."; trap - EXIT; exit 0; }
+    read -r -p "Confirmas? (s/N): " OK
+    # M3: el resto del script acepta si/yes; aqui solo valia una "s" suelta y
+    # quien escribia "si" cancelaba sin querer.
+    [[ "${OK,,}" =~ ^(s|si|sí|y|yes)$ ]] || { echo "Cancelado."; trap - EXIT; exit 0; }
 
     mkdir -p /root/backups
     CHIP_BACKUP="/root/backups/pre-cambiar-ip-${id}-$(date +%Y%m%d-%H%M%S).tar.gz"
@@ -1553,10 +1584,16 @@ change_vm_ip() {
     trap change_ip_rollback EXIT
 
     # 1) dejar la VM en el modo que exige la configuracion NUEVA
-    local CIC_NEW="user=${userref}"
+    # A2: antes se construia "user=${userref}" y solo se aplicaba si userref no
+    # estaba vacio. En una VM sin cicustom (creada a mano) eso significaba
+    # escribir el snippet y NO referenciarlo nunca: exito por pantalla, IP sin
+    # cambiar y ni un aviso. Ahora el cicustom se arma pieza a pieza.
+    local CIC_NEW=""
+    [ -n "$userref" ] && CIC_NEW="user=${userref}"
     if net_snippet_needed; then
         generate_network_yaml
-        CIC_NEW="${CIC_NEW},network=${snipstore}:snippets/network-data-${id}.yaml"
+        [ -n "$CIC_NEW" ] && CIC_NEW="${CIC_NEW},"
+        CIC_NEW="${CIC_NEW}network=${snipstore}:snippets/network-data-${id}.yaml"
         if [ "$HAD_SNIPPET" = false ]; then
             echo -e "${YELLOW}[AVISO] La nueva config exige snippet de red, asi que a partir de${NC}"
             echo -e "${YELLOW}        ahora la pestana Cloud-Init del panel dejara de aplicar la IP.${NC}"
@@ -1569,13 +1606,24 @@ change_vm_ip() {
             echo -e "${GREEN}     Cloud-Init del panel vuelve a funcionar en esta VM.${NC}"
         fi
     fi
-    [ -n "$userref" ] && qm set "$id" --cicustom "$CIC_NEW" >/dev/null
+    if [ -n "$CIC_NEW" ]; then
+        qm set "$id" --cicustom "$CIC_NEW" >/dev/null
+    elif [ "$HAD_SNIPPET" = true ]; then
+        # se retiro el unico componente que tenia el cicustom
+        qm set "$id" --delete cicustom >/dev/null
+    fi
 
     # 2) ipconfig0: es la fuente real cuando NO hay snippet, y cuando lo hay
     #    evita que el panel muestre datos falsos. En ambos casos hace que
     #    cambie el instance-id, que es lo que obliga a cloud-init a reaplicar.
+    # M2: la ip6 va SIEMPRE que haya IPv6; el gw6 solo si se indico. Antes, una
+    # IPv6 sin gateway no llegaba a ipconfig0 y el panel mostraba una realidad
+    # distinta a la del snippet.
     IPCONFIG="ip=${IPV4_VAL}/${IPV4_CIDR},gw=${GW_IPV4}"
-    [ "$IPV6_CONFIGURED" = true ] && [ -n "$GW_IPV6" ] && IPCONFIG="${IPCONFIG},ip6=${IPV6_VAL},gw6=${GW_IPV6}"
+    if [ "$IPV6_CONFIGURED" = true ]; then
+        IPCONFIG="${IPCONFIG},ip6=${IPV6_VAL}"
+        [ -n "$GW_IPV6" ] && IPCONFIG="${IPCONFIG},gw6=${GW_IPV6}"
+    fi
     qm set "$id" --ipconfig0 "$IPCONFIG" >/dev/null
 
     # 3) regenerar el disco cloud-init
@@ -1589,7 +1637,23 @@ change_vm_ip() {
             || echo -e "${YELLOW}[AVISO] No se pudo ejecutar 'cloud-init clean' (agente invitado?).${NC}"
         echo -e "${BLUE}==> Apagando la VM...${NC}"
         qm stop "$id" >/dev/null 2>&1 || true
-        for _ in $(seq 1 30); do qm status "$id" 2>/dev/null | grep -q stopped && break; sleep 2; done
+        # A3: antes, agotado el bucle se seguia igual a `qm start`, que fallaba
+        # con "already running" y disparaba el rollback: el usuario leia "fallo
+        # al cambiar la IP" sin saber que la causa fue que la VM no se apago.
+        local parada=false
+        for _ in $(seq 1 30); do
+            if qm status "$id" 2>/dev/null | grep -q stopped; then parada=true; break; fi
+            sleep 2
+        done
+        if [ "$parada" = false ]; then
+            echo -e "${YELLOW}[AVISO] La VM no se apago en 60s (guest que ignora ACPI?); forzando...${NC}"
+            qm stop "$id" --skiplock 1 >/dev/null 2>&1 || true
+            sleep 5
+            if ! qm status "$id" 2>/dev/null | grep -q stopped; then
+                echo -e "${RED}[ERROR] No se pudo apagar la VM ${id}; no se toca nada mas.${NC}"
+                exit 1
+            fi
+        fi
     fi
 
     echo -e "${BLUE}==> Arrancando la VM...${NC}"

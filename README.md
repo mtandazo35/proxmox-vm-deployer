@@ -346,6 +346,21 @@ conservando la vieja · `IMAGE_REFRESH=never|always` · migración del esquema
 v8.1 · caché corrupta · mirror caído con fallback a la build anterior ·
 upstream sin archivo de sumas · `prune_old_builds` sin TTY (informa, no borra).
 
+### `tests/test-validadores.sh` — validadores y decisión de snippet (22 asserts)
+
+```bash
+bash tests/test-validadores.sh deploy-vm.sh
+```
+
+Cubre `valid_ipv4`, `valid_cidr`, `valid_ipv6_addr`, `valid_ipv6_cidr` y la tabla
+de `net_snippet_needed`, más que `valid_ipv4` no pise las globales `a b c d`.
+
+> **Trampa al escribir este test:** extraer funciones del script con rangos `sed`
+> encadenados (`/^f()/,/^}/`) **mezcla definiciones**, porque `valid_ipv4` y
+> `valid_cidr` son de una línea y no cierran con `}` en columna 0. Durante la
+> auditoría eso hizo que `zzz::1/64` pareciera válida: era el arnés, no el
+> validador. El test extrae cada función con un parser que respeta ese detalle.
+
 ### `tests/test-vm-description.sh` — notas de la VM (3 combinaciones)
 
 Genera de verdad `IP_CHANGE_NOTE` y `VM_DESCRIPTION` para `/24`, `/32` e IPv6.
@@ -393,6 +408,26 @@ Descarga ~1 GB de imágenes reales la primera vez (quedan cacheadas en
 `/var/lib/vz/template/iso/`).
 
 ---
+
+## v8.6 — correcciones de la auditoría
+
+`AUDITORIA-v8.5.md` recoge 12 hallazgos. Los tres de severidad alta estaban en
+`--cambiar-ip`, y los tres se han corregido:
+
+- **A1** — no validaba la IPv6 tecleada, aunque el script tiene los validadores y
+  el flujo de despliegue sí los usa. Un typo hacía que netplan rechazara el
+  fichero entero: VM sin red, y como el modo apaga y enciende, sin acceso.
+- **A2** — en una VM sin `cicustom` (creada a mano), escribía el snippet y **no lo
+  referenciaba nunca**: mensajes de éxito, reinicio, y la IP sin cambiar. Fallo
+  silencioso, la peor categoría aquí. Ahora el `cicustom` se arma pieza a pieza.
+- **A3** — si la VM no se apagaba en 60 s se seguía igual a `qm start`, que falla
+  con «already running» y dispara el rollback: el usuario leía «fallo al cambiar
+  la IP» sin saber la causa real. Ahora fuerza el apagado o aborta diciéndolo.
+
+Y de las medias/bajas: el DNS se lee del snippet antes de caer a los públicos
+(pisar el resolver de un ISP con 8.8.8.8 no es aceptable), la `ip6` va siempre a
+`ipconfig0`, la confirmación acepta «si»/«yes» como el resto del script, las 22
+lecturas pasan a `read -r`, y `valid_ipv4` ya no contamina las globales `a b c d`.
 
 ## v8.4 — el snippet de red solo donde hace falta
 
