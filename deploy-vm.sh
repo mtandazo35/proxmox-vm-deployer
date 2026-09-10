@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Cloud-Init Proxmox - Instalador Modular V8.4
+# Cloud-Init Proxmox - Instalador Modular V8.5
 # Cambios 8.0: red por MAC fija (OUI Proxmox) en vez de match por driver/nombre
 # Cambios 8.1: set -E + trap EXIT (rollback cubre fallos dentro de funciones),
 # checksum por nombre remoto (Ubuntu nunca se verificaba), validación AUTH_MODE/
@@ -22,6 +22,9 @@
 # que necesita accept-ra:false). Para el resto la config nativa es equivalente
 # --tambien empareja por MAC-- y asi la pestana Cloud-Init del panel vuelve a
 # funcionar. --cambiar-ip sirve en ambos casos y migra de un modo al otro.
+# Cambios 8.5: el script se autoactualiza al arrancar (descarga la ultima version
+# de GitHub, la valida y se reejecuta), y la version vive en una sola variable
+# para que la ayuda y las notas de la VM no se descuadren.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -40,14 +43,65 @@ CPU_TYPE="host"; STORAGE_SSD_FLAG=""
 SUCCESS=false; ROLLBACK_EXECUTED=false; LOG_FILE=""; NETWORK_YAML_FILE=""; YAML_FILE=""
 VM_MAC=""; IMG_MIN_GB="2"; PERMIT_ROOT_LOGIN=""
 IPV6_VAL=""
-MODE="deploy"; TARGET_VMID=""
+VERSION="8.5"
+SCRIPT_URL="https://raw.githubusercontent.com/mtandazo35/proxmox-vm-deployer/master/deploy-vm.sh"
+MODE="deploy"; TARGET_VMID=""; SELF_UPDATE=1
 
 case "${1:-}" in
     --cambiar-ip|--change-ip) MODE="change-ip"; TARGET_VMID="${2:-}" ;;
     -h|--help)                MODE="help" ;;
+    --sin-actualizar|--no-update) SELF_UPDATE=0 ;;
     "")                       ;;
     *) echo "Opcion desconocida: $1 (usa --help)" >&2; exit 1 ;;
 esac
+[ "${2:-}" = "--sin-actualizar" ] || [ "${2:-}" = "--no-update" ] && SELF_UPDATE=0
+
+# ==================== AUTOACTUALIZACION ====================
+# Descarga la ultima version, la valida y se reejecuta. Todo fallo es NO
+# fatal: si GitHub no responde o la descarga no convence, se sigue con la
+# copia local en vez de dejar al usuario sin instalador.
+# Sustituir el fichero en caliente es seguro porque `mv` solo cambia la
+# entrada de directorio: el bash en curso mantiene abierto el inodo viejo,
+# y ademas se hace exec inmediatamente despues.
+self_update() {
+    [ "$SELF_UPDATE" = "1" ] || return 0
+    [ "${DEPLOY_VM_UPDATED:-0}" = "1" ] && return 0   # evita bucle de exec
+    [ "$MODE" = "help" ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    local self nuevo ver
+    self=$(readlink -f "$0" 2>/dev/null || echo "$0")
+    # Con `bash <(curl ...)` $0 es /dev/fd/N: no hay fichero que reemplazar.
+    [ -f "$self" ] || return 0
+    nuevo="${self}.nuevo"
+
+    echo -e "${BLUE}==> Buscando una version mas nueva...${NC}"
+    if ! curl -fsSL --max-time 20 "$SCRIPT_URL" -o "$nuevo" 2>/dev/null; then
+        echo -e "${YELLOW}[AVISO] No se pudo consultar GitHub; sigo con la copia local (v${VERSION}).${NC}"
+        rm -f "$nuevo"; return 0
+    fi
+    if [ ! -s "$nuevo" ] || ! head -1 "$nuevo" | grep -q "^#!/bin/bash"; then
+        echo -e "${YELLOW}[AVISO] La descarga no parece el script; sigo con la copia local.${NC}"
+        rm -f "$nuevo"; return 0
+    fi
+    if cmp -s "$nuevo" "$self"; then
+        rm -f "$nuevo"
+        echo -e "  ${GREEN}[OK] Ya tienes la ultima version (v${VERSION}).${NC}"
+        return 0
+    fi
+    # No instalar algo que no arranca: es la unica copia que tiene el nodo.
+    if ! bash -n "$nuevo" 2>/dev/null; then
+        echo -e "${YELLOW}[AVISO] La version de GitHub tiene errores de sintaxis; NO se instala.${NC}"
+        rm -f "$nuevo"; return 0
+    fi
+    ver=$(grep -m1 -oE "Instalador Modular V[0-9.]+" "$nuevo" | grep -oE "[0-9.]+$" || true)
+    cp -a "$self" "${self}.anterior" 2>/dev/null || true
+    mv "$nuevo" "$self" && chmod +x "$self"
+    echo -e "  ${GREEN}[OK] Actualizado v${VERSION} -> v${ver:-?}. Reiniciando el script...${NC}\n"
+    export DEPLOY_VM_UPDATED=1
+    exec bash "$self" "$@"
+}
+self_update "$@"
 
 # ==================== FUNCIONES DE VALIDACIÓN Y CONTROL ====================
 valid_ipv4() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { IFS='.' read -r a b c d <<< "$1"; (( a<=255 && b<=255 && c<=255 && d<=255 )); }; }
@@ -1274,7 +1328,7 @@ deploy_vm() {
 ${IP_CHANGE_NOTE}
 
 ---
-📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.3
+📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v${VERSION}
 📝 Log: ${LOG_FILE}"
 
     local CICUSTOM_ARG="user=${STORAGE_SNIP}:snippets/user-data-${VMID}.yaml"
@@ -1351,20 +1405,34 @@ ${IP_CHANGE_NOTE}
 # MODO --cambiar-ip: reconfigurar la red de una VM YA existente
 # ==============================================================================
 show_help() {
+    echo "deploy-vm.sh v${VERSION} - instalador de VMs Proxmox por cloud-init"
     cat <<'AYUDA'
-deploy-vm.sh v8.3 - instalador de VMs Proxmox por cloud-init
 
   deploy-vm.sh                      Despliegue interactivo de una VM nueva.
   deploy-vm.sh --cambiar-ip <VMID>  Cambia la IP/gateway de una VM ya creada.
   deploy-vm.sh --help               Esta ayuda.
+  deploy-vm.sh --sin-actualizar     No buscar version nueva al arrancar.
 
-POR QUE HACE FALTA --cambiar-ip
-  Las VMs creadas por este script usan `cicustom` con un snippet de red. Cuando
-  ese snippet existe, Proxmox lo entrega y DESCARTA el campo "IP Config (net0)"
-  de la pestana Cloud-Init: cambiarlo ahi no tiene ningun efecto, y no da error.
-  Ademas el instance-id se calcula de la config de Proxmox y NO del snippet, asi
-  que editar el .yaml a mano tampoco basta: cloud-init se cree ya aprovisionado
-  y deja el netplan como estaba. --cambiar-ip hace la secuencia completa.
+AUTOACTUALIZACION
+  Al arrancar descarga la ultima version de GitHub, la valida (que sea un
+  script y que pase 'bash -n') y se reejecuta. La copia anterior queda en
+  deploy-vm.sh.anterior. Si GitHub no responde, sigue con la copia local.
+
+CUANDO HACE FALTA --cambiar-ip
+  Depende de como se creo la VM. El instalador solo usa snippet de red donde el
+  generador nativo de Proxmox se queda corto:
+
+    IPv4 /32      -> snippet (hace falta on-link)   -> usa --cambiar-ip
+    IPv6 estatico -> snippet (hace falta accept-ra) -> usa --cambiar-ip
+    el resto      -> sin snippet -> la pestana Cloud-Init del panel SI funciona
+
+  Con snippet, Proxmox lo entrega y DESCARTA el campo "IP Config (net0)": tocarlo
+  en el panel no hace nada, y no da error. Ademas el instance-id se calcula de la
+  config de Proxmox y NO del snippet, asi que editar el .yaml a mano tampoco
+  basta: cloud-init se cree ya aprovisionado y deja el netplan como estaba.
+  --cambiar-ip hace la secuencia completa, sirve en los dos modos, y migra de uno
+  al otro si la configuracion nueva cambia de categoria.
+  Las notas de cada VM dicen en cual de los dos casos esta.
 AYUDA
 }
 
