@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Cloud-Init Proxmox - Instalador Modular V8.3
+# Cloud-Init Proxmox - Instalador Modular V8.4
 # Cambios 8.0: red por MAC fija (OUI Proxmox) en vez de match por driver/nombre
 # Cambios 8.1: set -E + trap EXIT (rollback cubre fallos dentro de funciones),
 # checksum por nombre remoto (Ubuntu nunca se verificaba), validación AUTH_MODE/
@@ -17,6 +17,11 @@
 # instance-id, asi que cloud-init se cree ya aprovisionado y no reescribe netplan:
 # hay que regenerar snippet + ipconfig0, `cloud-init clean` y apagar/encender.
 # Se avisa de esa trampa al terminar el despliegue y en las notas de la VM.
+# Cambios 8.4: el snippet de red ya NO se usa siempre, solo donde el generador
+# nativo de Proxmox se queda corto (/32, que necesita on-link, e IPv6 estatico,
+# que necesita accept-ra:false). Para el resto la config nativa es equivalente
+# --tambien empareja por MAC-- y asi la pestana Cloud-Init del panel vuelve a
+# funcionar. --cambiar-ip sirve en ambos casos y migra de un modo al otro.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -1098,10 +1103,36 @@ EOF
         fi
     fi
 }
-# FASE 8b: GENERACIÓN NETWORK-CONFIG v2 (Fix /32 on-link)
+# FASE 8b: GENERACIÓN NETWORK-CONFIG v2 (solo cuando hace falta)
+# ==============================================================================
+# El snippet de red rompe la pestana Cloud-Init del panel: cuando existe
+# `cicustom ...,network=`, Proxmox entrega el snippet y DESCARTA ipconfig0, que
+# es lo unico que escribe esa pestana. Asi que solo se usa donde el generador
+# nativo se queda corto:
+#   - /32: el network-config v1 de Proxmox no tiene 'on-link' y sin el netplan
+#     no instala la ruta por defecto si el gateway cae fuera de la subred.
+#   - IPv6 estatico: hace falta accept-ra:false o el SLAAC pelea con la fija.
+# En el resto la config nativa es equivalente (tambien empareja por MAC, que es
+# lo que arreglo el bug de portabilidad de la v8).
+net_snippet_needed() {
+    [ "${IPV4_CIDR:-24}" -eq 32 ] || [ "${IPV6_CONFIGURED:-false}" = true ]
+}
 # ==============================================================================
 generate_network_yaml() {
+    if ! net_snippet_needed; then
+        NETWORK_YAML_FILE=""
+        echo -e "\n${GREEN}[OK] Red estandar: se usa la config nativa de Proxmox${NC}"
+        echo -e "     (sin snippet -> la pestana Cloud-Init del panel SI funciona)"
+        return 0
+    fi
     echo -e "\n${BLUE}==> Generando network-config v2 para Cloud-Init...${NC}"
+    local WHY=""
+    if [ "$IPV4_CIDR" -eq 32 ]; then WHY="/32 on-link"; fi
+    if [ "$IPV6_CONFIGURED" = true ]; then
+        if [ -n "$WHY" ]; then WHY="${WHY} + "; fi
+        WHY="${WHY}IPv6 estatico"
+    fi
+    echo -e "     (necesario aqui: ${WHY})"
 
     ( umask 077 && : > "$NETWORK_YAML_FILE" )
 
@@ -1173,6 +1204,33 @@ deploy_vm() {
     IPCONFIG="ip=${IPV4_VAL}/${IPV4_CIDR},gw=${GW_IPV4}"
     [ "$IPV6_CONFIGURED" = true ] && IPCONFIG="${IPCONFIG},ip6=${IPV6_VAL},gw6=${GW_IPV6}"
 
+    # OJO: nada de $(...) dentro de la asignacion de IP_CHANGE_NOTE. Bajo
+    # set -e el estado de una asignacion es el de su ultima sustitucion, asi
+    # que un simple test que da falso aborta el despliegue entero. El motivo
+    # se calcula antes, con if.
+    local IP_CHANGE_NOTE NEED_REASON=""
+    if [ "$IPV4_CIDR" -eq 32 ]; then NEED_REASON="IPv4 /32"; fi
+    if [ "$IPV6_CONFIGURED" = true ]; then
+        if [ -n "$NEED_REASON" ]; then NEED_REASON="${NEED_REASON} + "; fi
+        NEED_REASON="${NEED_REASON}IPv6 estatico"
+    fi
+    if net_snippet_needed; then
+        IP_CHANGE_NOTE="## 🛠️ Como cambiar la IP
+
+> Esta VM lleva snippet de red (\`cicustom\`) porque su configuracion lo exige
+> (${NEED_REASON}), y por eso Proxmox **descarta** el campo
+> **Cloud-Init -> IP Config** del panel: cambiarlo ahi no hace nada.
+> Usa \`deploy-vm.sh --cambiar-ip ${VMID}\` en el nodo."
+    else
+        IP_CHANGE_NOTE="## 🛠️ Como cambiar la IP
+
+> Esta VM usa la configuracion nativa de Proxmox, asi que la pestana
+> **Cloud-Init -> IP Config** del panel **si funciona**: cambia la IP, pulsa
+> *Regenerate Image* y **apaga y enciende** la VM (un reboot no vale, el disco
+> cloud-init se adjunta al arrancar).
+> Tambien vale \`deploy-vm.sh --cambiar-ip ${VMID}\` en el nodo."
+    fi
+
     local NET_QUEUES=""
     (( CPU > 1 )) && NET_QUEUES=",queues=${CPU}"
 
@@ -1213,15 +1271,14 @@ deploy_vm() {
 - **Acceso:** ${AUTH_DESC}
 
 ---
-## 🛠️ Como cambiar la IP
-
-> La pestana **Cloud-Init -> IP Config** del panel **no funciona** en esta VM:
-> lleva \`cicustom\` con snippet de red y Proxmox descarta ese campo.
-> Usa \`deploy-vm.sh --cambiar-ip ${VMID}\` en el nodo.
+${IP_CHANGE_NOTE}
 
 ---
 📅 Desplegado: $(date '+%Y-%m-%d %H:%M')  ·  deploy-vm.sh v8.3
 📝 Log: ${LOG_FILE}"
+
+    local CICUSTOM_ARG="user=${STORAGE_SNIP}:snippets/user-data-${VMID}.yaml"
+    net_snippet_needed && CICUSTOM_ARG="${CICUSTOM_ARG},network=${STORAGE_SNIP}:snippets/network-data-${VMID}.yaml"
 
     {
         echo "[1/3] Creando estructura base de la VM..."
@@ -1243,7 +1300,7 @@ deploy_vm() {
           --serial0 socket \
           --vga serial0 \
           --description "$VM_DESCRIPTION" \
-          --cicustom "user=${STORAGE_SNIP}:snippets/user-data-${VMID}.yaml,network=${STORAGE_SNIP}:snippets/network-data-${VMID}.yaml"
+          --cicustom "$CICUSTOM_ARG"
 
         echo -e "\n[2/3] Redimensionando el disco duro..."
         qm resize "$VMID" scsi0 "${DISK}G"
@@ -1278,9 +1335,15 @@ deploy_vm() {
     echo -e "${CYAN}Acceso   : ssh root@${IPV4_VAL}"
     echo -e "${CYAN}Log      : ${LOG_FILE}${NC}\n"
 
-    echo -e "${YELLOW}[AVISO] Para cambiar la IP de esta VM NO uses la pestana Cloud-Init${NC}"
-    echo -e "${YELLOW}        del panel: lleva snippet de red (cicustom) y ese campo se ignora.${NC}"
-    echo -e "${YELLOW}        Usa:  $0 --cambiar-ip ${VMID}${NC}\n"
+    if net_snippet_needed; then
+        echo -e "${YELLOW}[AVISO] Esta VM lleva snippet de red (lo exige su /32 o su IPv6), asi que${NC}"
+        echo -e "${YELLOW}        la pestana Cloud-Init del panel NO le aplica la IP.${NC}"
+        echo -e "${YELLOW}        Para cambiarla:  $0 --cambiar-ip ${VMID}${NC}\n"
+    else
+        echo -e "${CYAN}Cambiar IP: la pestana Cloud-Init del panel funciona en esta VM"
+        echo -e "            (cambiar -> Regenerate Image -> apagar y encender),"
+        echo -e "            o bien:  $0 --cambiar-ip ${VMID}${NC}\n"
+    fi
 }
 
 
@@ -1352,21 +1415,29 @@ change_vm_ip() {
     VM_MAC=$(grep -oP '^net0:.*?virtio=\K[0-9A-Fa-f:]{17}' <<< "$conf" || true)
     [ -z "$VM_MAC" ] && { echo -e "${RED}[ERROR] No se pudo leer la MAC de net0.${NC}"; exit 1; }
 
-    local cic netref
+    # La VM puede estar en cualquiera de los dos modos: con snippet de red
+    # (manda el .yaml) o sin el (manda ipconfig0). Se detecta, y segun lo que
+    # pida la configuracion NUEVA se migra de un modo al otro.
+    local cic userref netref HAD_SNIPPET=false
     cic=$(awk -F': ' '/^cicustom:/{print $2}' <<< "$conf" || true)
-    if [ -z "$cic" ] || [[ "$cic" != *"network="* ]]; then
-        echo -e "${YELLOW}[AVISO] Esta VM no usa snippet de red: aqui SI manda 'ipconfig0'.${NC}"
-        echo -e "${YELLOW}        Puedes cambiarla desde el panel (Cloud-Init -> IP Config) y luego${NC}"
-        echo -e "${YELLOW}        'Regenerate Image' + apagar/encender. No hace falta este modo.${NC}"
-        exit 0
-    fi
-    netref=$(grep -oP 'network=\K[^,]+' <<< "$cic")
-    SNIPPET_FULL_PATH=$(snippet_dir_for_storage "${netref%%:*}")
+    userref=$(grep -oP 'user=\K[^,]+' <<< "$cic" || true)
+    netref=$(grep -oP 'network=\K[^,]+' <<< "$cic" || true)
+    [ -n "$netref" ] && HAD_SNIPPET=true
+
+    local snipstore="${netref%%:*}"
+    [ -z "$snipstore" ] && snipstore="${userref%%:*}"
+    [ -z "$snipstore" ] && snipstore="local"
+    SNIPPET_FULL_PATH=$(snippet_dir_for_storage "$snipstore")
     NETWORK_YAML_FILE="${SNIPPET_FULL_PATH}/network-data-${id}.yaml"
-    [ -f "$NETWORK_YAML_FILE" ] || { echo -e "${RED}[ERROR] No existe ${NETWORK_YAML_FILE}${NC}"; exit 1; }
 
     echo -e "\n${CYAN}--- Configuracion actual (la que de verdad se aplica) ---${NC}"
-    grep -E '^\s+(- [0-9a-fA-F]|addresses:|via:|on-link:)' "$NETWORK_YAML_FILE" || true
+    if [ "$HAD_SNIPPET" = true ] && [ -f "$NETWORK_YAML_FILE" ]; then
+        echo -e "  origen: snippet de red (${NETWORK_YAML_FILE})"
+        grep -E '^\s+(- [0-9a-fA-F]|addresses:|via:|on-link:)' "$NETWORK_YAML_FILE" || true
+    else
+        echo -e "  origen: configuracion nativa de Proxmox (ipconfig0)"
+        awk -F': ' '/^ipconfig0:/{print "  "$2}' <<< "$conf"
+    fi
     echo -e "${CYAN}---------------------------------------------------------${NC}"
 
     # ---- nueva IPv4 ----
@@ -1405,15 +1476,33 @@ change_vm_ip() {
 
     mkdir -p /root/backups
     CHIP_BACKUP="/root/backups/pre-cambiar-ip-${id}-$(date +%Y%m%d-%H%M%S).tar.gz"
-    tar czf "$CHIP_BACKUP" "$NETWORK_YAML_FILE" "/etc/pve/qemu-server/${id}.conf" 2>/dev/null || true
+    tar czf "$CHIP_BACKUP" $([ -f "$NETWORK_YAML_FILE" ] && echo "$NETWORK_YAML_FILE") \
+        "/etc/pve/qemu-server/${id}.conf" 2>/dev/null || true
     echo -e "${GREEN}[OK] Respaldo: ${CHIP_BACKUP}${NC}"
     trap change_ip_rollback EXIT
 
-    # 1) el snippet, que es lo que de verdad se entrega
-    generate_network_yaml
+    # 1) dejar la VM en el modo que exige la configuracion NUEVA
+    local CIC_NEW="user=${userref}"
+    if net_snippet_needed; then
+        generate_network_yaml
+        CIC_NEW="${CIC_NEW},network=${snipstore}:snippets/network-data-${id}.yaml"
+        if [ "$HAD_SNIPPET" = false ]; then
+            echo -e "${YELLOW}[AVISO] La nueva config exige snippet de red, asi que a partir de${NC}"
+            echo -e "${YELLOW}        ahora la pestana Cloud-Init del panel dejara de aplicar la IP.${NC}"
+        fi
+    else
+        rm -f "$NETWORK_YAML_FILE"
+        NETWORK_YAML_FILE=""
+        if [ "$HAD_SNIPPET" = true ]; then
+            echo -e "${GREEN}[OK] La nueva config no necesita snippet: se retira, y la pestana${NC}"
+            echo -e "${GREEN}     Cloud-Init del panel vuelve a funcionar en esta VM.${NC}"
+        fi
+    fi
+    [ -n "$userref" ] && qm set "$id" --cicustom "$CIC_NEW" >/dev/null
 
-    # 2) ipconfig0 en sincronia: no lo lee cloud-init, pero evita que el panel
-    #    muestre datos falsos y ademas hace que cambie el instance-id.
+    # 2) ipconfig0: es la fuente real cuando NO hay snippet, y cuando lo hay
+    #    evita que el panel muestre datos falsos. En ambos casos hace que
+    #    cambie el instance-id, que es lo que obliga a cloud-init a reaplicar.
     IPCONFIG="ip=${IPV4_VAL}/${IPV4_CIDR},gw=${GW_IPV4}"
     [ "$IPV6_CONFIGURED" = true ] && [ -n "$GW_IPV6" ] && IPCONFIG="${IPCONFIG},ip6=${IPV6_VAL},gw6=${GW_IPV6}"
     qm set "$id" --ipconfig0 "$IPCONFIG" >/dev/null

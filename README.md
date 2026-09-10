@@ -346,6 +346,23 @@ conservando la vieja · `IMAGE_REFRESH=never|always` · migración del esquema
 v8.1 · caché corrupta · mirror caído con fallback a la build anterior ·
 upstream sin archivo de sumas · `prune_old_builds` sin TTY (informa, no borra).
 
+### `tests/test-vm-description.sh` — notas de la VM (3 combinaciones)
+
+Genera de verdad `IP_CHANGE_NOTE` y `VM_DESCRIPTION` para `/24`, `/32` e IPv6.
+Existe porque `bash -n` **no** detecta esta familia de fallos y dos de ellos
+llegaron a producción:
+
+- **Backticks sin escapar** dentro de `VM_DESCRIPTION`, que es una cadena entre
+  comillas dobles: el Markdown se convertía en sustitución de comandos y salía
+  `cicustom: command not found`, con `set -e` abortando el despliegue.
+- **`$(...)` dentro de una asignación**: bajo `set -e` el estado de una
+  asignación es el de su última sustitución, así que un `[ ... ]` que da falso
+  mataba el script. Por eso el motivo se calcula antes, con `if`.
+
+```bash
+bash tests/test-vm-description.sh deploy-vm.sh
+```
+
 ### `tests/run-tests.sh` — deploy completo E2E
 
 Corre en cualquier Debian SIN Proxmox (se usó un VPS limpio) y hace descargas y
@@ -376,6 +393,38 @@ Descarga ~1 GB de imágenes reales la primera vez (quedan cacheadas en
 `/var/lib/vz/template/iso/`).
 
 ---
+
+## v8.4 — el snippet de red solo donde hace falta
+
+La consecuencia de lo anterior era fea: **todas** las VMs pagaban el precio de
+perder la pestaña Cloud-Init, para cubrir dos casos raros. Desde la v8.4 el
+`network=` del `cicustom` **solo se añade cuando el generador nativo de Proxmox
+se queda corto**:
+
+| Caso | Snippet | Pestaña Cloud-Init del panel |
+|---|---|---|
+| IPv4 `/32` (gateway fuera de la subred) | sí, hace falta `on-link` | no aplica la IP → usar `--cambiar-ip` |
+| IPv6 estático | sí, hace falta `accept-ra: false` | no aplica la IP → usar `--cambiar-ip` |
+| **Todo lo demás (`/24`, `/30`… sin IPv6)** | **no** | **funciona** |
+
+Para una VM normal la config nativa es equivalente — **también empareja por
+MAC**, que era todo el motivo del arreglo de la v8:
+
+```
+- type: physical
+  name: eth0
+  mac_address: 'bc:24:11:fa:5e:17'
+  subnets:
+  - type: static
+    address: '10.87.87.3'
+    netmask: '255.255.255.0'
+    gateway: '10.87.87.1'
+```
+
+`--cambiar-ip` funciona en los dos modos y **migra de uno al otro**: si la nueva
+configuración deja de necesitar snippet lo retira del `cicustom` y la pestaña del
+panel vuelve a funcionar; si pasa a necesitarlo, lo crea y avisa de que el panel
+deja de servir. Las notas de cada VM dicen cuál de los dos casos es el suyo.
 
 ## v8.3 — cambiar la IP de una VM ya creada
 
