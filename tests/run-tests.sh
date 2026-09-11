@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Banco de pruebas de deploy-vm.sh V8.2 — corre en un host Debian SIN Proxmox.
+# Banco de pruebas de deploy-vm.sh — corre en un host Debian SIN Proxmox.
 # Los comandos PVE (qm/pvesh/pvesm) y qemu-img/ip se stubean: nada real se
 # crea; los stubs registran sus argumentos para las aserciones. wget/mkpasswd/
 # ssh-keygen/findmnt/lsblk/python3 son REALES (descargas y checksums genuinos).
@@ -8,6 +8,22 @@
 D=/root/deploy-test
 mkdir -p "$D/bin"
 PASS=0; FAIL=0
+
+# CRITICO: desde la v8.5 el script se autoactualiza desde GitHub al arrancar.
+# Sin esto, el banco copiaria deploy-vm.sh a $D y el propio script se
+# sustituiria por el del repo remoto antes de ejecutarse: estariamos probando
+# la version publicada y NO los cambios locales que queremos validar.
+export DEPLOY_VM_UPDATED=1
+
+# El banco NO copiaba el script bajo prueba: lo esperaba ya en $D. Si faltaba,
+# las 4 corridas salian con exit 127 ("No such file or directory") y las ~48
+# aserciones fallaban en bloque, como si el instalador estuviera roto.
+SUT="${1:-/root/deploy-vm.sh}"
+[ -f "$SUT" ] || { echo "No encuentro el script a probar: $SUT"; echo "Uso: $0 [ruta/a/deploy-vm.sh]"; exit 1; }
+cp -f "$SUT" "$D/deploy-vm.sh"
+chmod +x "$D/deploy-vm.sh"
+echo "Probando: $SUT  ($(grep -m1 -oE 'Instalador Modular V[0-9.]+' "$SUT"))"
+echo "sha256: $(sha256sum "$SUT" | cut -d' ' -f1)"
 
 ok()  { echo "  ✅ $1"; PASS=$((PASS+1)); }
 bad() { echo "  ❌ $1"; FAIL=$((FAIL+1)); }
@@ -124,7 +140,15 @@ printf '%s\n' \
 RC_A=$?
 
 [ $RC_A -eq 0 ] && ok "RUN A terminó con exit 0" || bad "RUN A exit=$RC_A (ver runA.out)"
-check "Checksum Debian verificado (sha512)"          "Checksum OK (sha512sum)"                     "$D/runA.out"
+# La imagen se verifica por sha512 tanto si se descarga ("Checksum OK") como
+# si ya estaba en cache ("Verificando la imagen en cache"). Aceptar solo el
+# primer mensaje hacia que el test pasara con cache limpia y fallara con
+# cache caliente: dependia del orden de ejecucion, no del codigo.
+if grep -qE "Checksum OK \(sha512sum\)|imagen en cach.*sha512sum" "$D/runA.out"; then
+    ok "Checksum Debian verificado (sha512, descarga o cache)"
+else
+    bad "Checksum Debian verificado (sha512, descarga o cache)"
+fi
 check "Disco mínimo detectado desde la imagen"       "Disco virtual de la imagen:"                 "$D/runA.out"
 check "VMID 109 rechazado (existe en cluster)"       "ya existe en el cluster"                     "$D/runA.out"
 check "AUTH_MODE inválido re-pregunta"               "Debe ser 1, 2 o 3"                           "$D/runA.out"
@@ -185,7 +209,13 @@ printf '%s\n' \
 RC_B=$?
 
 [ $RC_B -eq 0 ] && ok "RUN B terminó con exit 0" || bad "RUN B exit=$RC_B (ver runB.out)"
-check "Checksum Ubuntu AHORA SÍ verificado (fix nombre remoto)" "Checksum OK (sha256sum)"          "$D/runB.out"
+# Mismo caso que la de Debian: con la imagen ya en cache no se imprime
+# "Checksum OK", pero la verificacion sha256 SI ocurre por la otra rama.
+if grep -qE "Checksum OK \(sha256sum\)|imagen en cach.*sha256sum" "$D/runB.out"; then
+    ok "Checksum Ubuntu verificado (sha256, descarga o cache)"
+else
+    bad "Checksum Ubuntu verificado (sha256, descarga o cache)"
+fi
 checknot "Ya no salta la verificación por nombre"    "Saltando verificación"                       "$D/runB.out"
 check "Disco mínimo Noble = 4 GB (3.5 GiB virtual)"  "Disco virtual de la imagen: 4 GB"            "$D/runB.out"
 check "Disco 3GB < imagen rechazado"                 "Disco mínimo 4GB"                            "$D/runB.out"

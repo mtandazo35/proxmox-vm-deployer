@@ -378,7 +378,30 @@ llegaron a producción:
 bash tests/test-vm-description.sh deploy-vm.sh
 ```
 
-### `tests/run-tests.sh` — deploy completo E2E
+### `tests/run-tests.sh` — deploy completo E2E (59 aserciones)
+
+```bash
+bash tests/run-tests.sh /root/deploy-vm.sh
+```
+
+Stubea `qm`/`pvesh`/`pvesm`/`ip`/`qemu-img`, así que **no crea ninguna VM real**;
+`wget`, `mkpasswd`, `ssh-keygen` y `python3` sí son reales (descargas y checksums
+genuinos). Cuatro corridas: Debian con IPv6 y VLAN, Ubuntu con `/32` on-link,
+rollback con `qm resize` fallando, y abort temprano.
+
+Tres defectos del propio banco, corregidos en la v8.6 (los tres daban resultados
+engañosos, no del instalador):
+
+- **No copiaba el script bajo prueba.** Lo esperaba ya en `$D`; si faltaba, las 4
+  corridas salían con `exit 127` y ~48 aserciones fallaban en bloque, como si el
+  instalador estuviera roto. Ahora recibe la ruta como argumento y lo copia.
+- **Probaba la versión de GitHub, no la local.** Desde la v8.5 el script se
+  autoactualiza al arrancar, así que se sustituía a sí mismo antes de ejecutarse.
+  El banco exporta `DEPLOY_VM_UPDATED=1` para desactivarlo.
+- **Dos aserciones dependían del estado de la caché.** Solo aceptaban el mensaje
+  de la rama de descarga, así que pasaban con caché limpia y fallaban con caché
+  caliente. Ahora aceptan ambas ramas, con un patrón que además no depende del
+  locale (`.` no casa con la `é` en un `grep` orientado a bytes).
 
 Corre en cualquier Debian SIN Proxmox (se usó un VPS limpio) y hace descargas y
 checksums **reales**. Los comandos PVE se **stubean** —
